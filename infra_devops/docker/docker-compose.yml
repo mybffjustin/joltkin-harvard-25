@@ -1,0 +1,127 @@
+# infra_devops/docker/docker-compose.yml
+
+name: joltkin-harvard-25
+
+# Compose v2 (no "version" key). Designed for Docker Compose ≥ v2.22.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Networks & Volumes
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  appnet:
+    driver: bridge
+
+volumes:
+  # For frontend-dev (Vite) so the host bind mount doesn't clobber node_modules
+  frontend_node_modules:
+
+# Absolute-ish anchors to keep paths readable (compose file lives in infra_devops/docker/)
+x-paths:
+  repo_root: &repo_root ../..
+  frontend_src: &frontend_src ../../frontend/react_app
+  streamlit_src: &streamlit_src ../../frontend/streamlit_app
+  backend_src: &backend_src ../../backend
+
+# Optional: rebuild-only watchers that do NOT overlap with bind mounts
+x-develop:
+  streamlit_rebuild: &streamlit_rebuild
+    develop:
+      watch:
+        - action: rebuild
+          path: ../../requirements.txt
+        - action: rebuild
+          path: ../../frontend/streamlit_app/Dockerfile
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Services
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  # ===========================================================================
+  # FRONTEND (prod-like): Vite build → static served by NGINX
+  # Exposes container :80 as host :5173 for QR/README consistency
+  # ===========================================================================
+  frontend:
+    build:
+      context: *repo_root
+      dockerfile: frontend/react_app/Dockerfile
+      args:
+        VITE_ALGOD_URL: "https://testnet-api.algonode.cloud"
+        VITE_ALGOD_TOKEN: ""
+        VITE_NETWORK: "TestNet"
+        VITE_ROUTER_APP_ID: "0"
+        VITE_TICKET_ASA_ID: "0"
+        VITE_SUPERFAN_APP_ID: "0"
+        VITE_SUPERFAN_ADMIN_ADDR: ""
+    ports:
+      - "5173:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+    networks: [appnet]
+    restart: unless-stopped
+    # No develop.watch here; this is the built/static site
+
+  # ===========================================================================
+  # STREAMLIT OPERATOR CONSOLE (hot reload via bind mounts)
+  # Reads Algorand/TestNet config from repo-root .env
+  # ===========================================================================
+  streamlit:
+    build:
+      context: *repo_root
+      dockerfile: frontend/streamlit_app/Dockerfile
+    env_file:
+      - ../../.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      WATCHFILES_FORCE_POLLING: "true"        # reliable file watching on Mac/Windows
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    working_dir: /app
+    command: >
+      streamlit run streamlit_app/app.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.runOnSave true
+    ports:
+      - "8501:8501"
+    volumes:
+      # Hot reload source
+      - ../../frontend/streamlit_app:/app/streamlit_app:rw,delegated
+      # Read the latest PyTeal contracts
+      - ../../backend/contracts:/app/contracts:ro
+      # Mount runtime env (read-only for safety)
+      - ../../.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8501/_stcore/health | grep -q 'ok' || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks: [appnet]
+    restart: unless-stopped
+    <<: *streamlit_rebuild   # rebuild-only watchers (safe; no overlap with bind mounts)
+
+  # ===========================================================================
+  # BACKEND CLI TOOLS (contracts + scripts)
+  # Default command: list created apps (human-friendly)
+  # ===========================================================================
+  backend:
+    build:
+      context: *repo_root
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ../../.env
+    volumes:
+      - ../../.env:/app/.env:ro
+      - ../../backend:/app/backend:rw
+    working_dir: /app/backend/scripts
+    command: ["python", "list_apps.py", "--details"]
+    depends_on:
+      streamlit:
+        condition: service_started
+    networks: [appnet]
+    restart: unless-stopped

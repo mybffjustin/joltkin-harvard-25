@@ -1,0 +1,12 @@
+# .markdownlint-cli2.yaml
+config:
+  MD013: { line_length: 160 }  # let lines be longer
+  MD034: false                 # allow bare URLs
+  MD022: true
+  MD031: true
+  MD032: true
+  MD036: true
+  MD012: true
+ignores:
+  - CHANGELOG.md
+  - README.md          # <- skip README for now

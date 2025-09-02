@@ -1,0 +1,36 @@
+# pyproject.toml
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+select = ["E","F","I","UP","B","C4","T20","RUF"]
+ignore = ["E203"]
+exclude = ["frontend/react_app", "node_modules", "persistence"]
+
+[tool.ruff.lint]
+select = ["E","F","I","UP","B","C4","T20","RUF"]
+ignore = ["E203","E501"]  # <- let Black handle line length
+
+[tool.ruff.lint.isort]
+known-first-party = ["core","services","pages","ui","backend"]
+
+# CLI scripts use prints intentionally; Streamlit files sometimes need path bootstraps
+[tool.ruff.lint.per-file-ignores]
+"backend/scripts/*.py" = ["T201"]         # allow prints in CLI tools
+"frontend/streamlit_app/**/*.py" = ["E402"]  # allow “imports not at top” in Streamlit subtree
+"backend/contracts/*.py" = ["F403", "F405", "T201"]       # allow printing TEAL to stdout from __main__
+"frontend/streamlit_app/ui/sidebar.py" = ["C408"]  # allow dict() → optional to fix later
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+exclude = "frontend/react_app|node_modules|persistence"
