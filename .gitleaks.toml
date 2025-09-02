@@ -1,0 +1,6 @@
+# .gitleaks.toml
+[allowlist]
+paths = [
+  '''\.secrets\.baseline$''',
+  '''\.secrets\.baseline\.json$'''
+]

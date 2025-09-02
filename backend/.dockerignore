@@ -1,0 +1,422 @@
+# backend/.dockerignore
+# ===================================================================
+# Core VCS & Docker context bloat
+# ===================================================================
+.git
+.git/**
+.gitignore
+.gitattributes
+.gitmodules
+.github/
+.gitlab/
+.hg/
+.svn/
+*.patch
+*.diff
+**/node_modules
+**/.git
+**/.DS_Store
+**/dist
+
+# ===================================================================
+# OS junk & editor cruft
+# ===================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# Linux/Unix
+.nfs*
+# Editors/IDEs
+.idea/
+*.iml
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# ===================================================================
+# Logs, PIDs, caches, reports
+# ===================================================================
+logs/
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pip-log.txt
+*.pid
+*.seed
+*.pid.lock
+.nyc_output/
+.eslintcache
+.stylelintcache
+.cache/
+.tmp/
+.temp/
+reports/
+test-results/
+junit.xml
+coverage/
+coverage-*
+*.lcov
+
+# ===================================================================
+# Secrets & credentials (DO NOT COPY INTO IMAGES)
+# ===================================================================
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.env
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+*.cer
+*.der
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+.ssh/
+.aws/
+.azure/
+.gcloud/
+.kube/
+*.kubeconfig
+*.ovpn
+*.token
+*.gpg
+*.asc
+# Package manager auth (uncomment if these contain tokens)
+# .npmrc
+# .yarnrc
+# .pnpmrc
+
+# ===================================================================
+# Node / JS / TS / Frontend
+# ===================================================================
+node_modules/
+bower_components/
+jspm_packages/
+.npm/
+.yarn/
+.yarn/cache/
+.pnpm-store/
+.bun/
+dist/
+build/
+out/
+lib/
+lib-cov/
+.next/
+.next/cache/
+.nuxt/
+.angular/
+.angular/cache/
+.vite/
+.parcel-cache/
+.svelte-kit/
+.astro/
+.storybook-out/
+storybook-static/
+.typedoc/
+.typings/
+.esbuild/
+.webpack/
+.tmp/
+
+# ===================================================================
+# Python
+# ===================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.mypy_cache/
+.pytest_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.venv/
+venv/
+env/
+ENV/
+.ipynb_checkpoints
+.jupyter/
+
+# ===================================================================
+# Java / Kotlin / Gradle / Maven
+# ===================================================================
+target/
+build/
+.gradle/
+.gradle-cache/
+*.class
+*.war
+*.ear
+*.jar
+# Keep wrappers but ignore caches
+!gradlew
+!gradlew.bat
+!gradle/wrapper/**
+!mvnw
+!mvnw.cmd
+!.mvn/wrapper/**
+
+# ===================================================================
+# Go
+# ===================================================================
+bin/
+*.test
+*.out
+# vendor/  # (uncomment to exclude vendored deps if not used)
+
+# ===================================================================
+# Rust
+# ===================================================================
+target/
+**/*.rs.bk
+# (Keep Cargo.lock for binaries)
+
+# ===================================================================
+# .NET
+# ===================================================================
+bin/
+obj/
+*.user
+*.suo
+*.pdb
+*.mdb
+*.cache
+*.dbmdl
+*.jfm
+.vs/
+
+# ===================================================================
+# Ruby / Rails
+# ===================================================================
+.bundle/
+vendor/bundle/
+log/
+tmp/
+coverage/
+.byebug_history
+# Rails asset & storage
+public/system/
+storage/
+# SQLite (if used locally)
+db/*.sqlite3
+db/*.sqlite3-*
+
+# ===================================================================
+# PHP / Composer
+# ===================================================================
+vendor/
+composer.phar
+
+# ===================================================================
+# Elixir / Phoenix
+# ===================================================================
+_build/
+deps/
+*.ez
+cover/
+
+# ===================================================================
+# Dart / Flutter
+# ===================================================================
+.dart_tool/
+.packages
+.pub-cache/
+.flutter-plugins
+.flutter-plugins-dependencies
+.melos_tool/
+build/
+# Platform builds
+android/.gradle/
+android/app/build/
+ios/Pods/
+ios/.symlinks/
+macos/Flutter/ephemeral/
+
+# ===================================================================
+# Android
+# ===================================================================
+local.properties
+*/build/
+captures/
+.cxx/
+*.keystore
+*.jks
+
+# ===================================================================
+# iOS / Xcode
+# ===================================================================
+build/
+DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ===================================================================
+# Infrastructure as Code & Cloud artifacts
+# ===================================================================
+.terraform/
+.terragrunt-cache/
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+serverless/.serverless/
+.chalice/deployments/
+pulumi.*.yaml
+.pulumi/
+cdk.out/
+helm-chart-*.tgz
+
+# ===================================================================
+# ML / Data science artifacts (large, usually not needed in builds)
+# ===================================================================
+.wandb/
+mlruns/
+.mlflow/
+.dvc/
+.dvc/cache/
+checkpoints/
+weights/
+*.ckpt
+*.onnx
+*.h5
+*.pt
+*.pth
+*.model
+*.pb
+# Hugging Face / datasets caches
+.huggingface/
+datasets/
+# Uncomment to exclude raw data by default; keep samples/ & README
+# data/**
+# !data/README.md
+# !data/samples/**
+# !data/*.sample.*
+
+# ===================================================================
+# Static site generators & CMS
+# ===================================================================
+.public/
+.cache-loader/
+.sass-cache/
+.hugo_build.lock
+.next-static/
+.netlify/
+.cache/gatsby/
+public/
+
+# ===================================================================
+# Containers / Compose / CI (not needed in build context)
+# ===================================================================
+.docker/
+docker/overlay/
+docker/data/
+docker-compose.override.yml
+.circleci/
+.gitlab-ci.yml
+azure-pipelines.yml
+Jenkinsfile
+
+# ===================================================================
+# Archives & big binaries (optional – uncomment if desired)
+# ===================================================================
+# *.zip
+# *.tar
+# *.tar.gz
+# *.tgz
+# *.7z
+# *.iso
+
+# ===================================================================
+# Keep essential manifests & lockfiles (even if matched above)
+# ===================================================================
+!package.json
+!package-lock.json
+!yarn.lock
+!pnpm-lock.yaml
+!bun.lockb
+!tsconfig.json
+!vite.config.*
+!next.config.*
+!nuxt.config.*
+!svelte.config.*
+!angular.json
+!babel.config.*
+!eslint.config.*
+!.eslintrc*
+!.prettier*
+!.stylelint*
+!postcss.config.*
+!tailwind.config.*
+!Pipfile
+!Pipfile.lock
+!poetry.lock
+!pyproject.toml
+!requirements*.txt
+!environment.yml
+!conda.yml
+!setup.py
+!setup.cfg
+!MANIFEST.in
+!go.mod
+!go.sum
+!Cargo.toml
+!Cargo.lock
+!composer.json
+!composer.lock
+!Gemfile
+!Gemfile.lock
+!mix.exs
+!mix.lock
+!pubspec.yaml
+!mvnw
+!mvnw.cmd
+!.mvn/wrapper/**
+!gradlew
+!gradlew.bat
+!gradle/wrapper/**
+!Dockerfile
+!Dockerfile.*
+!.dockerignore

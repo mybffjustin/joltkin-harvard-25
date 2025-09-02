@@ -1,0 +1,139 @@
+# .pre-commit-config.yaml
+repos:
+  # --- Core hygiene & safety ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+        exclude: >
+          (?x)^(
+            public/.*\.(png|jpg|jpeg|webp|svg|gif|mp3|mp4|mov)$|
+            data/samples/|
+            docs/assets/
+          )
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+        args: ['--allow-multiple-documents']
+        exclude: >
+          (?x)^(
+            helm/.*/templates/.*\.ya?ml$|   # Helm templates use {{ }} and break YAML parsing
+            charts/.*/templates/.*\.ya?ml$|
+            .*\.tpl$                        # any other template fragments
+          )
+      - id: check-json
+      - id: detect-private-key
+      - id: forbid-new-submodules
+      - id: no-commit-to-branch
+        args: ["--branch", "main", "--branch", "master"]
+        stages: [pre-commit]   # modern stage name
+
+  # --- Secrets scanning (baseline + deep scan) ---
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args:
+          - '--baseline'
+          - '.secrets.baseline'
+          - '--exclude-files'
+          - '(?i)profiles\.example\.yml'
+        exclude: |
+          ^(docs/|examples/)
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+        args: ["--pre-commit", "--redact"]   # diff-only, no full repo scan
+        pass_filenames: false
+        exclude: '^\.secrets\.baseline(\.json)?$'
+
+  # --- Python: linter & formatter ---
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  # --- JS/TS: prettier & eslint ---
+  - repo: https://github.com/kaechele/pre-commit-mirror-prettier
+    rev: v3.6.2
+    hooks:
+      - id: prettier
+        additional_dependencies: []
+        files: >
+          (?x)^(
+            (apps|packages|web|ui|src|lib|components|pages|app)/.*\.(js|jsx|ts|tsx|css|scss|md|json|yml|yaml|graphql)
+          )$
+
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.34.0
+    hooks:
+      - id: eslint
+        files: '^(apps|packages|web|ui|src|lib|components|pages|app)/.*\.(js|jsx|ts|tsx)$'
+        additional_dependencies: []
+
+  # --- SQL (Snowflake) ---
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.4.2
+    hooks:
+    - id: sqlfluff-lint
+      name: sqlfluff (snowflake)
+      args: [--dialect, snowflake]
+      files: ^(models/|seeds/|warehouse/)
+
+    - id: sqlfluff-lint
+      name: sqlfluff (postgres for Prisma)
+      args:
+        - --dialect
+        - postgres
+        - --exclude-rules
+        - RF06,LT01,LT05
+      files: ^next-admin/prisma/migrations/
+
+  # --- dbt validation ---
+  - repo: https://github.com/dbt-checkpoint/dbt-checkpoint
+    rev: v2.0.7
+    hooks:
+      # Generate target/manifest.json; only run if a dbt project exists
+      - id: dbt-parse
+        args: ['--config', '.dbt-checkpoint.yaml']
+        additional_dependencies: ['dbt-core~=1.8', 'dbt-snowflake~=1.8']  # swap adapter if not on Snowflake
+        pass_filenames: false
+        files: '(^|/)dbt_project\.yml$'
+
+      # Read the manifest/catalog; only run when dbt files change
+      - id: check-model-has-properties-file
+        args: ['--config', '.dbt-checkpoint.yaml']
+        additional_dependencies: ['dbt-core~=1.8', 'dbt-snowflake~=1.8']
+        pass_filenames: false
+        files: '(models/|macros/|seeds/|snapshots/|dbt_project\.yml)'
+
+      - id: check-model-has-tests
+        args: ['--test-cnt', '1', '--', '--config', '.dbt-checkpoint.yaml']
+        additional_dependencies: ['dbt-core~=1.8', 'dbt-snowflake~=1.8']
+        pass_filenames: false
+        files: '(models/|tests/|dbt_project\.yml)'
+
+      - id: check-model-columns-have-desc
+        args: ['--config', '.dbt-checkpoint.yaml']
+        additional_dependencies: ['dbt-core~=1.8', 'dbt-snowflake~=1.8']
+        pass_filenames: false
+        files: '(models/|dbt_project\.yml)'
+
+      - id: check-source-has-all-columns
+        args: ['--config', '.dbt-checkpoint.yaml']
+        additional_dependencies: ['dbt-core~=1.8', 'dbt-snowflake~=1.8']
+        pass_filenames: false
+        files: '(models/|seeds/|dbt_project\.yml)'
+
+  # --- Markdown / docs ---
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.18.1
+    hooks:
+      - id: markdownlint-cli2
+        files: '\.(md|mdx)$'

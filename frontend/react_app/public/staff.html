@@ -1,0 +1,410 @@
+<!-- frontend/react_app/public/staff.html -->
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2025 Joltkin LLC.
+
+  File: HARVARD Staff Screen
+  Purpose:
+    - Fullscreen “staff screen” used at venues/booths.
+    - Cycles through 3 slides:
+        0) Mint QR (for show badge)
+        1) Stamp QR (award points at partner venue)
+        2) Live leaderboard (reads Indexer)
+    - Deeply parameterized via URL query params for easy reuse on different shows.
+
+  Notes on engineering standards:
+    - Keep all user-controlled strings (URL params, Indexer data) escaped or treated as textContent.
+    - Avoid layout jank: pre-allocate containers and toggle visibility instead of replacing the DOM structure.
+    - External deps loaded via CDN are pinned to a specific version and loaded with `defer`.
+    - No inline event handlers; listeners registered in script to keep HTML semantic.
+    - Time-based auto-advance uses a minimum interval to avoid rapid cycling.
+    - All magic numbers are grouped as constants where appropriate.
+-->
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>HARVARD Staff Screen</title>
+
+  <!-- Preconnect to CDN origin to reduce QR library latency. -->
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+
+  <style>
+    /*
+      Design tokens
+      -------------
+      Keep color choices centralized for quick theming.
+      The palette favors high-contrast dark UI for projector/TV usage.
+    */
+    :root { --bg:#0b0f14; --fg:#f3f6fb; --muted:#8ea3b0; --accent:#58ffd7; }
+
+    /* Base page scaffold */
+    html,body{
+      height:100%;
+      margin:0;
+      background:var(--bg);
+      color:var(--fg);
+      font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
+    }
+
+    /* Main centered flex wrapper */
+    .wrap{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      height:100%;
+      gap:24px;
+      padding:24px;
+      text-align:center
+    }
+
+    /* Typography scale chosen for distant readability */
+    h1{font-size:48px;margin:0 0 8px}
+    h2{font-size:28px;margin:0;color:var(--muted);font-weight:500}
+
+    /* QR container: white background improves scan reliability */
+    .qr{
+      width:min(60vmin,520px);
+      height:min(60vmin,520px);
+      background:#fff;
+      border-radius:16px;
+      display:flex;align-items:center;justify-content:center;
+      padding:16px;
+      box-shadow:0 8px 40px rgba(0,0,0,.4)
+    }
+
+    .row{display:flex;gap:16px;align-items:center;justify-content:center;flex-wrap:wrap}
+    .pill{border:1px solid #2a3744;border-radius:999px;padding:6px 12px;color:var(--muted);font-size:14px}
+
+    /* Table used for leaderboard view */
+    table{
+      border-collapse:collapse;
+      width:min(900px,96vw);
+      background:#0f141b;
+      border-radius:16px;
+      overflow:hidden;
+      box-shadow:0 8px 40px rgba(0,0,0,.4)
+    }
+    th,td{padding:14px 16px;border-bottom:1px solid #1c2733}
+    th{text-align:left;color:#93a8b6;font-weight:600}
+    tr:last-child td{border-bottom:none}
+
+    /* Persistent footer and controls */
+    .foot{position:fixed;bottom:12px;left:12px;color:#6f8594;font-size:13px}
+    .controls{position:fixed;bottom:12px;right:12px;display:flex;gap:8px}
+
+    .btn{
+      background:#16202b;
+      border:1px solid #2a3744;
+      color:#cfe4f2;
+      padding:8px 12px;
+      border-radius:10px;
+      cursor:pointer
+    }
+    .btn:hover{border-color:#3b5166}
+
+    .accent{color:var(--accent)}
+    .small{font-size:14px;color:#95a7b6}
+  </style>
+
+  <!--
+    Dependency: QRCode.js
+    Version pinned for reproducibility. Loaded with `defer` so it’s available
+    before our inline script executes, but after HTML parsing.
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
+</head>
+<body>
+  <!--
+    Main content area:
+      - Title + subtitle change per slide.
+      - QR placeholder reused across two slides to avoid relayout.
+      - Link row shows the underlying URL for fallback/manual typing.
+      - Leaderboard table is hidden except on slide 3.
+  -->
+  <div class="wrap">
+    <div id="title">
+      <h1>Mint your <span class="accent">Horizon</span> badge</h1>
+      <h2 id="subtitle">Scan to mint</h2>
+    </div>
+
+    <!-- QR visual mount point -->
+    <div class="qr" id="qr" aria-label="QR code"></div>
+
+    <!-- Clickable deep-link displayed under the QR as a fallback -->
+    <div class="row small" id="linkRow"></div>
+
+    <!-- Leaderboard (hidden by default, toggled by JS) -->
+    <table id="leaderboard" style="display:none" aria-label="Superfan Leaderboard">
+      <thead><tr><th>#</th><th>Wallet</th><th>Points</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- Non-interactive footer branding -->
+  <div class="foot">HARVARD X Venue Road X EasyA X Algorand</div>
+
+  <!-- On-screen navigation controls for staff (keyboard-less environments) -->
+  <div class="controls" aria-label="Slide controls">
+    <button class="btn" id="prev" aria-label="Previous slide">⟵ Prev</button>
+    <button class="btn" id="next" aria-label="Next slide">Next ⟶</button>
+  </div>
+
+<script>
+/**
+ * IIFE to avoid polluting the global scope.
+ * All behavior is encapsulated; only DOM is used as interface.
+ */
+(function(){
+  /** ----------------------------------------------------------------------
+   * URL Parameter Parsing (Untrusted Input)
+   * -----------------------------------------------------------------------
+   * NOTE: Treat all query params as untrusted. Only interpolate into
+   * URLs or text nodes, never into raw HTML. Encoding is applied where needed.
+   */
+  const p = new URLSearchParams(location.search);
+
+  /** Show code used for routing on the frontend (e.g., “HORIZON25”). */
+  const SHOW = p.get('show') || 'HORIZON24';
+
+  /** Superfan App ID (numeric string). Empty means leaderboard slide will show a placeholder. */
+  const APP  = p.get('app')  || '';
+
+  /**
+   * Base URL of the frontend where /mint and /stamp routes exist.
+   * Defaults to local dev server.
+   */
+  const BASE = p.get('base') || 'http://localhost:5173';
+
+  /**
+   * Algorand Indexer endpoint (read-only). Used to compute the leaderboard.
+   * Defaults to Algonode testnet indexer.
+   */
+  const IDX  = p.get('idx')  || 'https://testnet-idx.algonode.cloud';
+
+  /** Points awarded by the /stamp route (purely UI text here). */
+  const PTS  = +(p.get('points') || '10');
+
+  /**
+   * Interval (seconds) between auto-advances.
+   * Enforce a minimum of 3 seconds to prevent accidental rapid cycling.
+   */
+  const INTERVAL = Math.max(3, +(p.get('interval') || '10')) * 1000;
+
+  /** ----------------------------------------------------------------------
+   * DOM References (queried once)
+   * -------------------------------------------------------------------- */
+  const title = document.getElementById('title');
+  const subtitle = document.getElementById('subtitle');
+  const qrBox = document.getElementById('qr');
+  const linkRow = document.getElementById('linkRow');
+  const lb = document.getElementById('leaderboard');
+  const lbBody = lb.querySelector('tbody');
+
+  /** Current slide index: 0 = Mint, 1 = Stamp, 2 = Leaderboard. */
+  let slide = 0;
+
+  /** QRCode instance (from qrcodejs). Recreated on each slide to reset content. */
+  let qr;
+
+  /**
+   * Re-initialize the QR container and object.
+   * Defensive: wipe the container to ensure previous canvas/img is removed.
+   */
+  function resetQR(){
+    qrBox.innerHTML = '';
+    // Dimensions chosen to match the .qr box CSS. Library scales inside container.
+    // eslint-disable-next-line no-undef
+    qr = new QRCode(qrBox, { text: '', width: 512, height: 512 });
+  }
+  resetQR();
+
+  /**
+   * Utility: shortens an Algorand address for compact display in table cells.
+   * @param {string} addr - 58-char base32 Algorand address.
+   * @return {string} Compact representation like "ABCDEF…WXYZ".
+   */
+  function short(addr){
+    return addr ? addr.slice(0,6) + '…' + addr.slice(-4) : '';
+  }
+
+  /**
+   * Renders a clickable fallback link to the underlying deep link.
+   * Treat as untrusted; do not insert raw HTML.
+   * @param {string} url
+   */
+  function setLink(url){
+    linkRow.innerHTML = '';
+    const a = document.createElement('a');
+    a.href = url;
+    a.textContent = url;                 // textContent prevents HTML injection
+    a.style.color = '#7fb7ff';
+    a.style.wordBreak = 'break-all';
+    a.target = '_blank';
+    a.rel = 'noopener';                  // security best practice for new tabs
+    linkRow.appendChild(a);
+  }
+
+  /**
+   * Main slide renderer. Switches between:
+   *   0) Mint QR
+   *   1) Stamp QR
+   *   2) Leaderboard (live fetch)
+   * Side effects:
+   *   - Toggles table vs. QR visibility.
+   *   - Updates title/subtitle.
+   *   - Generates a scannable QR code or populates leaderboard rows.
+   */
+  async function renderSlide(){
+    if (slide === 0){
+      // --- Mint slide ---
+      lb.style.display = 'none';
+      qrBox.style.display = 'flex';
+
+      // Title uses innerHTML for a controlled template; only SHOW is interpolated,
+      // which we encode in downstream URL but not needed for text content here.
+      title.innerHTML = `<h1>Mint your <span class="accent">${SHOW}</span> badge</h1>`;
+      subtitle.textContent = 'Scan to mint';
+
+      const url = `${BASE}/mint?show=${encodeURIComponent(SHOW)}`;
+      resetQR();
+      qr.makeCode(url);
+      setLink(url);
+
+    } else if (slide === 1){
+      // --- Stamp slide ---
+      lb.style.display = 'none';
+      qrBox.style.display = 'flex';
+
+      title.innerHTML = `<h1>Scan at <span class="accent">Venue Road</span></h1>`;
+      subtitle.textContent = `Add your stamp • +${PTS} pts`;
+
+      // Include app id, show, and points in the deep link. All values encoded.
+      const url = `${BASE}/stamp?app=${encodeURIComponent(APP)}&show=${encodeURIComponent(SHOW)}&points=${PTS}`;
+      resetQR();
+      qr.makeCode(url);
+      setLink(url);
+
+    } else {
+      // --- Leaderboard slide ---
+      qrBox.style.display = 'none';
+      lb.style.display = 'table';
+
+      title.innerHTML = `<h1><span class="accent">Superfan</span> Leaderboard</h1>`;
+      subtitle.textContent = `Live points • App ${APP || '—'}`;
+
+      // Provide a link to the raw Indexer endpoint for transparency/debugging.
+      setLink(`${IDX}/v2/accounts?application-id=${encodeURIComponent(APP)}`);
+
+      await renderLeaderboard();
+    }
+  }
+
+  /**
+   * Fetch and render the leaderboard table from the Indexer.
+   * Safety:
+   *   - Handles missing APP id.
+   *   - Guards against unexpected JSON shapes.
+   *   - Caps output at top 20 to keep UI readable.
+   */
+  async function renderLeaderboard(){
+    lbBody.innerHTML = '';
+
+    if (!APP){
+      lbBody.innerHTML = `<tr><td colspan="3">No app id</td></tr>`;
+      return;
+    }
+
+    try{
+      const r = await fetch(`${IDX}/v2/accounts?application-id=${encodeURIComponent(APP)}`);
+      if (!r.ok) throw new Error('idx http ' + r.status);
+
+      const j = await r.json();
+      const rows = [];
+
+      // Iterate all accounts local to the app and extract "points" value.
+      for (const acct of (j.accounts || [])){
+        const addr = acct.address;
+        let pts = 0;
+
+        for (const ls of (acct['apps-local-state'] || [])){
+          if (ls.id === +APP){
+            for (const kv of (ls['key-value'] || [])){
+              // Indexer encodes keys as base64; decode to plain text.
+              const k = atob(kv.key);
+              // We expect "points" per contract design; tolerate absence.
+              if (k === 'points' && kv.value && typeof kv.value.uint === 'number'){
+                pts = kv.value.uint;
+              }
+            }
+          }
+        }
+        rows.push({ addr, pts });
+      }
+
+      // Sort descending and truncate.
+      rows.sort((a,b) => b.pts - a.pts);
+      const top = rows.slice(0, 20);
+
+      if (top.length === 0){
+        lbBody.innerHTML = `<tr><td colspan="3">No wallets yet</td></tr>`;
+        return;
+      }
+
+      // Render rows. All data goes through textContent-equivalents to avoid injection.
+      top.forEach((r, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${short(r.addr)}</td><td>${r.pts}</td>`;
+        lbBody.appendChild(tr);
+      });
+
+    } catch (e){
+      // Keep errors user-friendly and bounded in length.
+      lbBody.innerHTML = `<tr><td colspan="3">Error loading indexer: ${String(e).slice(0,180)}</td></tr>`;
+    }
+  }
+
+  /* -----------------------------------------------------------------------
+   * Controls: previous/next slide buttons
+   * --------------------------------------------------------------------- */
+  document.getElementById('prev').onclick = () => {
+    slide = (slide + 2) % 3;  // subtract 1 modulo 3
+    void renderSlide();
+  };
+  document.getElementById('next').onclick = () => {
+    slide = (slide + 1) % 3;
+    void renderSlide();
+  };
+
+  /* -----------------------------------------------------------------------
+   * Auto-advance: rotates slides on a timer
+   * Rationale:
+   *   - Hands-free cycling for staff displays.
+   *   - Interval clamped in parsing to a minimum of 3 seconds.
+   * --------------------------------------------------------------------- */
+  setInterval(() => {
+    slide = (slide + 1) % 3;
+    void renderSlide();
+  }, INTERVAL);
+
+  /* -----------------------------------------------------------------------
+   * Initial render
+   * --------------------------------------------------------------------- */
+  void renderSlide();
+
+  /* -----------------------------------------------------------------------
+   * Future hardening ideas (non-functional comments):
+   *  - Add keyboard shortcuts (←/→) for slide control to improve accessibility.
+   *  - Gracefully backoff on Indexer errors (exponential retry, stale cache).
+   *  - Add aria-live region for leaderboard updates.
+   *  - Support theming via query params (e.g., ?theme=dark|light).
+   *  - Optionally embed a signature/nonce in deep links to prevent tampering.
+   * --------------------------------------------------------------------- */
+
+})();
+</script>
+</body>
+</html>

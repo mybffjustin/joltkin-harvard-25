@@ -1,0 +1,330 @@
+<!-- frontend/react_app/index.html -->
+<!--
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2025 Joltkin LLC.
+
+  Entry HTML for the React/Vite frontend.
+  Goals:
+    • Mobile-first, dark/light aware, accessible defaults.
+    • Progressive Web App (PWA) affordances without breaking plain web.
+    • Minimal global CSS with CSS custom properties for theming.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- UTF-8 for broad character support -->
+    <meta charset="UTF-8" />
+    <!--
+      Responsive layout:
+      - width=device-width ensures 1 CSS px ≈ 1 device-independent px
+      - viewport-fit=cover allows content to extend into iOS safe areas (we pad via .safe)
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <!-- System-level color scheme hint (helps form controls, scrollbars, etc.) -->
+    <meta name="color-scheme" content="light dark" />
+    <!-- Adaptive address bar color on mobile for both themes -->
+    <meta name="theme-color" content="#A51C30" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0f0f10" media="(prefers-color-scheme: dark)">
+    <title>Joltkin x Algorand</title>
+
+    <!--
+      PWA metadata:
+      - manifest for installable app metadata and icons
+      - icons sized for common launchers; can expand as needed
+      - iOS specific meta to enable standalone feel and translucent status bar
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/pwa-192.png" />
+    <link rel="apple-touch-icon" href="/icons/pwa-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <!--
+      Social sharing (Open Graph + Twitter Card)
+      Update descriptive text/image per event/campaign to improve link previews.
+    -->
+    <meta property="og:title" content="Horizon Superfan Badge" />
+    <meta property="og:description" content="Mint → Dine → Cheer. Earn perks at Venue Road with Algorand." />
+    <meta property="og:image" content="/og/horizon.png" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!--
+      Web fonts:
+      - Preconnect reduces TLS/DNS latency.
+      - Inter chosen for readability; keep weights minimal to reduce FOIT/FOUT.
+      - If you add more weights, prefer `display=swap` behavior already included.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <style>
+      /* ---------------------------------------------------------------
+         Harvard Crimson theme — accessible light/dark palettes
+         - Centralize tokens via CSS custom properties.
+         - Favor WCAG AA contrast; adjust hues per theme where needed.
+         --------------------------------------------------------------- */
+      :root {
+        /* Brand */
+        --crimson-600: #A51C30;     /* Harvard Crimson (light mode baseline) */
+        --crimson-700: #8f1a2a;
+        --crimson-050: #fff2f4;
+
+        /* Light palette */
+        --bg: #ffffff;
+        --surface: #ffffff;
+        --card: #fafafa;
+        --text: #111213;
+        --muted: #4b5563;
+        --border: #d1d5db;
+        --field-bg: #ffffff;
+        --field-border: #c5c9d2;
+        --placeholder: #9aa3b2;
+
+        --focus: var(--crimson-600);
+
+        /* Radii scale for consistent rounding across components */
+        --radius-sm: 12px;
+        --radius-md: 14px;
+        --radius-lg: 16px;
+
+        /* Inform UA of supported schemes to improve defaults (e.g., form controls) */
+        color-scheme: light dark;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          /* Dark palette tuned for contrast and legibility */
+          --bg: #0f1012;
+          --surface: #111316;
+          --card: #16191d;
+          --text: #f5f6f7;
+          --muted: #c5c8ce;
+          --border: #2f343b;
+
+          /* Inputs need stronger separation in dark for clarity */
+          --field-bg: #1b2026;
+          --field-border: #3b424b;
+          --placeholder: #98a2b3;
+
+          /* Slightly brighter crimson for AA contrast on dark backgrounds */
+          --crimson-600: #d12c41;
+          --focus: var(--crimson-600);
+        }
+      }
+
+      @media (forced-colors: active) {
+        /* High-contrast mode (Windows): use system colors where appropriate */
+        :root {
+          --border: CanvasText;
+          --focus: Highlight;
+        }
+      }
+
+      /* ---------------------------------------------------------------
+         Base + sizing model
+         - border-box to make padding predictable
+         - enable font smoothing for better text rendering
+         --------------------------------------------------------------- */
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body, #root { height: 100%; }
+      body {
+        margin: 0;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        text-rendering: optimizeLegibility;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* Safe-area padding for devices with display cutouts (iOS notch) */
+      .safe {
+        padding-left: max(16px, env(safe-area-inset-left));
+        padding-right: max(16px, env(safe-area-inset-right));
+      }
+
+      /* Skip link to support keyboard users and screen readers */
+      .skip-link {
+        position: absolute;
+        inset-inline-start: 8px;
+        inset-block-start: 8px;
+        z-index: 1000;
+        padding: 10px 14px;
+        border-radius: var(--radius-sm);
+        background: var(--crimson-600);
+        color: #fff;
+        text-decoration: none;
+        transform: translateY(-150%);
+      }
+      .skip-link:focus { transform: translateY(0); outline: none; }
+
+      /* ---------------------------------------------------------------
+         Controls: inputs & buttons — consistent sizing & contrast
+         - Ensure 44px min target size for touch (WCAG, Apple HIG).
+         - Use :focus-visible to avoid noisy focus styles for mouse users.
+         --------------------------------------------------------------- */
+      label {
+        display: block;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--muted);
+        margin-block-end: 6px;
+      }
+
+      input {
+        display: block;
+        width: 100%;
+        /* 44px minimum hit target; padding chosen to keep height consistent */
+        min-height: 44px;
+        padding: 10px 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--field-border);
+        background: var(--field-bg);
+        color: var(--text);
+        caret-color: var(--text);
+        font-size: 1rem;
+      }
+      input::placeholder { color: var(--placeholder); }
+
+      /* Normalize native differences across engines (iOS inner shadow, etc.) */
+      input[type="text"],
+      input[type="number"] {
+        appearance: none;
+        -webkit-appearance: none;
+      }
+
+      input:focus-visible {
+        outline: 3px solid color-mix(in oklab, var(--focus) 80%, transparent);
+        outline-offset: 2px;
+        border-color: var(--focus);
+      }
+
+      button {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        min-width: 44px;
+        padding: 12px 16px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: color-mix(in oklab, var(--surface) 92%, transparent);
+        color: var(--text);
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover { filter: brightness(0.98); }
+      button:focus-visible {
+        outline: 3px solid color-mix(in oklab, var(--focus) 80%, transparent);
+        outline-offset: 2px;
+      }
+      button[disabled] { opacity: .5; cursor: not-allowed; }
+
+      /* Primary button variant with brand color */
+      .btn-primary {
+        background: var(--crimson-600);
+        border-color: var(--crimson-600);
+        color: #fff;
+      }
+      .btn-primary:hover { filter: brightness(1.05); }
+
+      /* “Tab button” styling; aria-selected/disabled drive active state */
+      .tab {
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+      }
+      .tab[aria-selected="true"],
+      .tab[disabled] {
+        background: var(--crimson-050);
+        border-color: var(--crimson-600);
+        color: var(--crimson-600);
+      }
+      @media (prefers-color-scheme: dark) {
+        .tab[aria-selected="true"],
+        .tab[disabled] {
+          background: #24171a; /* crimson-tinted surface for dark AA contrast */
+          color: #ffd9de;      /* readable on tinted bg */
+          border-color: var(--crimson-600);
+        }
+      }
+
+      /* Generic card container for panels */
+      .card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 16px;
+        background: var(--card);
+      }
+
+      /* Sticky action bar for prominent mobile actions */
+      .actionbar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        backdrop-filter: saturate(140%) blur(6px);
+        background: color-mix(in oklab, var(--bg) 80%, transparent);
+        border-top: 1px solid var(--border);
+        padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+        z-index: 50;
+      }
+
+      /* Link defaults + accessible focus rings */
+      a { color: var(--crimson-600); }
+      a:focus-visible {
+        outline: 3px solid color-mix(in oklab, var(--focus) 80%, transparent);
+        outline-offset: 2px;
+      }
+
+      /* Respect user motion preferences to reduce animation when requested */
+      @media (prefers-reduced-motion: reduce) {
+        * { animation: none !important; transition: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      Skip link: first interactive element for quick keyboard navigation.
+      Targets #root which is the app's main region.
+    -->
+    <a href="#root" class="skip-link">Skip to main content</a>
+
+    <!--
+      React/Vite mounts here.
+      role="main" communicates landmark to AT; .safe applies notch-safe padding.
+    -->
+    <div id="root" role="main" class="safe"></div>
+
+    <!--
+      Progressive enhancement: register a service worker if available.
+      - Wrapped in feature detection.
+      - Registration failure is intentionally silent to avoid UX noise.
+      - /sw.js is optional; if absent, this is a no-op.
+    -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
+
+    <!--
+      Application entry (ESM). Vite will handle module resolution and
+      inject HMR in dev. Keep this last to allow CSS variables to be ready
+      before React renders.
+    -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

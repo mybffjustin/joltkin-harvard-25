@@ -1,0 +1,291 @@
+# backend/scripts/.gitignore
+# =========================
+# OS junk & editors
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.nfs*
+.Trash-*
+.idea/
+*.iml
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+.vs/
+*.swp
+*.swo
+*~
+.history/
+
+# =========================
+# Logs, PIDs, caches, reports
+# =========================
+logs/
+*.log
+*.log.*
+*.pid
+*.seed
+*.pid.lock
+coverage/
+coverage-*
+*.lcov
+.nyc_output/
+.eslintcache
+.stylelintcache
+.prettier-cache
+.cache/
+.cache-loader/
+.tmp/
+.temp/
+reports/
+test-results/
+junit.xml
+.playwright-report/
+playwright/.cache/
+cypress/screenshots/
+cypress/videos/
+cypress/downloads/
+.allure-results/
+.allure-report/
+
+# =========================
+# Secrets & credentials
+# (Keep only the *.example variants)
+# =========================
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.env.local
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.csr
+*.cer
+*.der
+*.p8
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+.ssh/
+# Cloud/CLI creds
+.aws/
+.azure/
+.gcloud/
+.kube/
+*.kubeconfig
+snowsql.cnf
+.snowflake/
+.snowsql/
+*.ovpn
+*.token
+*.gpg
+*.asc
+# Package manager auth (uncomment only if you knowingly need to commit)
+# .npmrc
+# .yarnrc
+# .pnpmrc
+
+# =========================
+# Node / Next.js
+# =========================
+node_modules/
+bower_components/
+jspm_packages/
+.npm/
+.yarn/
+.yarn/cache/
+.pnpm-store/
+.pnpm-debug.log*
+.bun/
+dist/
+build/
+out/
+lib/
+.next/
+.next/cache/
+.nuxt/
+.svelte-kit/
+.astro/
+.angular/
+.angular/cache/
+.vite/
+.parcel-cache/
+.esbuild/
+.webpack/
+.storybook-out/
+storybook-static/
+.typedoc/
+.vercel/
+.netlify/
+# Built source maps (keep only if you intentionally commit them)
+**/*.map
+
+# =========================
+# Python (Streamlit, Django tooling, tests)
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+downloads/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv/
+venv/
+env/
+ENV/
+.mypy_cache/
+.pytest_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.ipynb_checkpoints/
+.jupyter/
+# Streamlit
+.streamlit/secrets.toml
+
+# =========================
+# Django (if present)
+# =========================
+staticfiles/
+media/
+*.sqlite3
+*.sqlite3-*
+local_settings.py
+
+# =========================
+# Snowflake / dbt
+# =========================
+# dbt artifacts
+target/
+dbt_packages/
+dbt_modules/
+logs/
+# dbt profiles (often contain creds) – keep example only
+profiles.yml
+profiles-*.yml
+!profiles.example.yml
+
+# =========================
+# Data science / model artifacts (huge)
+# =========================
+.wandb/
+mlruns/
+.mlflow/
+.dvc/
+.dvc/cache/
+checkpoints/
+weights/
+*.ckpt
+*.onnx
+*.h5
+*.pt
+*.pth
+*.model
+*.pb
+# Vector DBs / embeddings
+index.faiss
+*.ann
+# Datasets & caches
+.huggingface/
+datasets/
+# If you keep raw data locally, uncomment:
+# data/**
+# !data/README.md
+# !data/samples/**
+# !data/*.sample.*
+
+# =========================
+# Containers / local runtime
+# =========================
+.docker/
+docker/overlay/
+docker/data/
+docker-compose.override.yml
+postgres-data/
+mysql-data/
+redis-data/
+dump.rdb
+
+# =========================
+# Infra-as-code & cloud outputs
+# =========================
+.terraform/
+.terragrunt-cache/
+terraform.tfstate
+terraform.tfstate.*
+*.tfvars
+serverless/.serverless/
+.chalice/deployments/
+pulumi.*.yaml
+.pulumi/
+cdk.out/
+helm-chart-*.tgz
+chart.lock
+
+# =========================
+# Archives & big binaries (optional)
+# =========================
+# *.zip
+# *.tar
+# *.tar.gz
+# *.tgz
+# *.7z
+# *.iso
+# *.dmg
+
+# =========================
+# Keep essential manifests & lockfiles
+# =========================
+!package.json
+!package-lock.json
+!yarn.lock
+!pnpm-lock.yaml
+!bun.lockb
+!tsconfig.json
+!next.config.*
+!babel.config.*
+!eslint.config.*
+!.eslintrc*
+!.prettier*
+!.stylelint*
+!postcss.config.*
+!tailwind.config.*
+!turbo.json
+!pnpm-workspace.yaml
+!Pipfile
+!Pipfile.lock
+!poetry.lock
+!pyproject.toml
+!requirements*.txt
+!environment.yml
+!conda.yml
+!setup.py
+!setup.cfg
+!MANIFEST.in
+!dbt_project.yml
+!.dockerignore
+!Dockerfile
+!Dockerfile.*
+.env
