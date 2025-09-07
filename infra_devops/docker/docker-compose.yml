@@ -1,5 +1,4 @@
 # infra_devops/docker/docker-compose.yml
-
 name: joltkin-harvard-25
 
 # Compose v2 (no "version" key). Designed for Docker Compose ≥ v2.22.
@@ -14,6 +13,8 @@ networks:
 volumes:
   # For frontend-dev (Vite) so the host bind mount doesn't clobber node_modules
   frontend_node_modules:
+  # Persist Ollama models/cache across container restarts
+  ollama_models:
 
 # Absolute-ish anchors to keep paths readable (compose file lives in infra_devops/docker/)
 x-paths:
@@ -36,6 +37,29 @@ x-develop:
 # Services
 # ─────────────────────────────────────────────────────────────────────────────
 services:
+  # ===========================================================================
+  # OLLAMA (LLM runtime) — optional but enabled by default
+  # If you run Ollama on the HOST instead, set in .env:
+  #   OLLAMA_BASE_URL=http://host.docker.internal:11434
+  # ===========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"   # expose for local dev or other tools
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:11434/api/tags"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+      start_period: 20s
+    networks: [appnet]
+    restart: unless-stopped
+    # NOTE: By default this only serves; pull models once with:
+    #   docker exec -it ollama ollama pull llama3.1:8b
+
   # ===========================================================================
   # FRONTEND (prod-like): Vite build → static served by NGINX
   # Exposes container :80 as host :5173 for QR/README consistency
@@ -78,6 +102,10 @@ services:
       WATCHFILES_FORCE_POLLING: "true"        # reliable file watching on Mac/Windows
       STREAMLIT_SERVER_HEADLESS: "true"
       STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      # Prefer in-cluster Ollama service; override via .env if using host daemon
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # Optionally choose model via env; default used by app code if unset
+      # OLLAMA_MODEL: llama3.1:8b
     working_dir: /app
     command: >
       streamlit run streamlit_app/app.py
@@ -101,8 +129,13 @@ services:
     depends_on:
       frontend:
         condition: service_healthy
+      ollama:
+        condition: service_started
     networks: [appnet]
     restart: unless-stopped
+    extra_hosts:
+      # lets containers reach host's services if you set OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - "host.docker.internal:host-gateway"
     <<: *streamlit_rebuild   # rebuild-only watchers (safe; no overlap with bind mounts)
 
   # ===========================================================================
