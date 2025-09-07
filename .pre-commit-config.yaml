@@ -71,7 +71,7 @@ repos:
           )$
 
   - repo: https://github.com/pre-commit/mirrors-eslint
-    rev: v9.34.0
+    rev: v9.35.0
     hooks:
       - id: eslint
         files: '^(apps|packages|web|ui|src|lib|components|pages|app)/.*\.(js|jsx|ts|tsx)$'
