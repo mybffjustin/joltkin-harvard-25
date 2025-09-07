@@ -38,11 +38,7 @@ type ProcessLike = {
   browser?: boolean
 }
 
-// Minimal module declaration so TS accepts `import process from 'process'` without @types/node.
-declare module 'process' {
-  const _default: ProcessLike
-  export default _default
-}
+// (Removed obsolete custom 'process' module augmentation that caused TS error when real types exist.)
 
 // --------------------------------------------------------------------------------------
 // Runtime polyfills
@@ -65,7 +61,6 @@ const g = globalThis as unknown as {
  * - Many crypto/encoding utilities expect `globalThis.Buffer`.
  */
 if (typeof g.Buffer === 'undefined') {
-  // @ts-expect-error: augmenting the global object for Node-compat in the browser
   g.Buffer = Buffer
 }
 
@@ -81,19 +76,15 @@ if (typeof g.process === 'undefined') {
   // Ensure `env` exists to avoid `undefined` access in config-driven libs.
   proc.env = proc.env ?? {}
 
-  // Provide `nextTick` using microtask queue if missing (Safari/WebView safety).
-  proc.nextTick =
-    proc.nextTick ??
-    ((cb: (...args: any[]) => void, ...args: any[]) =>
-      Promise.resolve().then(() => cb(...args)))
+  // Provide a minimal nextTick using a microtask if missing.
+  proc.nextTick = proc.nextTick ?? ((cb: (...args: any[]) => void, ...args: any[]) =>
+    Promise.resolve().then(() => cb(...args)))
 
   // Mark as a browser runtime for libraries that branch on this flag.
   proc.browser = true
 
-  // @ts-expect-error: augmenting the global object for Node-compat in the browser
   g.process = proc
 }
-
 /**
  * Polyfill global:
  * - Some legacy libs (e.g., bn.js, older buffers) reference `global` instead of `globalThis`.

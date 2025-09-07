@@ -63,6 +63,11 @@ Runs on **Algorand** (fast, low fee). A **Streamlit** app gives a no-code demo; 
 
 ---
 
+- Demo Video(docs/joltkin-video.mp4)
+- Deploy Router(docs/1.png)
+- Buy/Resale(docs/2.png)
+
+---
 ## TL;DR Quickstart (Local Dev)
 
 ```bash

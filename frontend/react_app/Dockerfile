@@ -1,23 +1,28 @@
 # frontend/react_app/Dockerfile
 # -----------------------------------------------------------------------------
 # React (Vite) build -> Nginx static serve
-# Build context MUST be the repo root: ../../ (from infra_devops/docker)
 # -----------------------------------------------------------------------------
 
 FROM node:22-alpine AS build
-ARG NPM_VERSION=11.5.2
+ARG NPM_VERSION=11.6.0
 RUN npm i -g "npm@${NPM_VERSION}" --no-fund --no-audit
 WORKDIR /app
 
-# Copy the entire app (incl. lockfile if present)
+# OPTIONAL: if your build script runs `algokit` (e.g. generate typed clients),
+# install it safely in a venv and expose to PATH for this stage only.
+RUN apk add --no-cache python3 py3-pip \
+ && python3 -m venv /opt/py \
+ && /opt/py/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/py/bin/pip install --no-cache-dir algokit \
+ && /opt/py/bin/algokit --version
+ENV PATH="/opt/py/bin:${PATH}"
+
 COPY frontend/react_app/ ./
 
-# Install deps (prefer lockfile if available)
-# Uses BuildKit cache for faster npm installs if enabled
 RUN --mount=type=cache,target=/root/.npm \
     sh -c 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
 
-# Build with Vite; inject envs at build time
+# build with your envs
 ARG VITE_ALGOD_URL
 ARG VITE_ALGOD_TOKEN
 ARG VITE_NETWORK=TestNet
@@ -38,13 +43,8 @@ RUN npm run build
 # -----------------------------------------------------------------------------
 
 FROM nginx:1.29-alpine AS runtime
-
-# SPA-friendly nginx config
 COPY frontend/react_app/nginx.conf /etc/nginx/conf.d/default.conf
-
-# Built static assets
 COPY --from=build /app/dist /usr/share/nginx/html
-
 EXPOSE 80
 HEALTHCHECK --interval=15s --timeout=5s --retries=6 \
   CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1
