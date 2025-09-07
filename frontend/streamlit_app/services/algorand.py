@@ -10,29 +10,29 @@ This module centralizes common Algorand helpers used across the Streamlit demo:
   • Balance/min-balance calculations and formatting
   • Reading on-chain global/local state (Router globals, Superfan points)
   • Funding helpers (best funder selection, top-up, retry on MBR deficits)
-  • One-shot ops for creating a demo ASA and deploying the Router app
+  • One-shot ops for creating a demo ASA and deploying the Router & Superfan apps
   • Trading helpers (opt-in checks, asset balance)
 
 Design principles
 -----------------
-- **No side effects** beyond explicit network calls; functions are pure where possible.
-- **Fail safe**: defensive parsing of Indexer/Algod responses to withstand partial data.
-- **Operator ergonomics**: clear error messages and small building blocks for UI code.
-- **Prod-friendliness**: docstrings, types, and careful fee/MBR accounting.
+- No hidden side effects; functions do only what they say.
+- Fail safe; tolerate partial/variant Algod/Indexer payloads.
+- Operator friendly; clear errors + conservative fee/MBR buffers.
+- Production-minded; typed, documented, small building blocks.
 
 Notes
 -----
-This code targets **Algorand TestNet** for demos. Before production use:
-  • audit contract logic and transaction assembly,
-  • harden error handling and logging,
-  • remove mnemonic handling from UI workflows.
+Targets **TestNet** demo use. Before production: audit contracts & flows,
+tighten error handling/logging, and remove mnemonic handling from UIs.
 """
 
+from dataclasses import dataclass
+from collections.abc import Callable
 import base64
 import pathlib
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+import importlib.util
+from typing import Any
 
 from algosdk import account, encoding, mnemonic
 from algosdk import transaction as ftxn
@@ -40,43 +40,45 @@ from algosdk.transaction import wait_for_confirmation
 from algosdk.v2client import algod, indexer
 from pyteal import Mode, compileTeal
 
-from core.constants import (
-    APP_LOCAL_MBR,
-    ASSET_MBR,
-)
+from core.constants import APP_LOCAL_MBR, ASSET_MBR
+
+# =============================================================================
+# Tunables
+# =============================================================================
+
+DEFAULT_FEE_BUFFER = 7_000
+CREATE_APP_FEE_BUFFER = 8_000
+TOPUP_CUSHION_SMALL = 30_000
+TOPUP_CUSHION_MED = 40_000
 
 # =============================================================================
 # Address & balance utilities
 # =============================================================================
 
 
+def _addr32(addr: str) -> bytes:
+    """Decode a bech32 (58-char) Algorand address into 32 raw bytes, with checks."""
+    try:
+        raw = encoding.decode_address(addr)
+    except Exception as e:
+        raise ValueError(f"Invalid Algorand address: {addr}") from e
+    if len(raw) != 32:
+        raise ValueError(f"Address did not decode to 32 bytes: {addr}")
+    return raw
+
+
 def addr_from_mn(mn: str | None) -> str | None:
-    """Derive an Algorand address from a 25-word mnemonic.
-
-    Args:
-        mn: 25-word mnemonic (or None/empty).
-
-    Returns:
-        The corresponding account address, or None if input is falsy or invalid.
-    """
+    """Derive an Algorand address from a 25-word mnemonic (or None on bad input)."""
     if not mn:
         return None
     try:
         return account.address_from_private_key(mnemonic.to_private_key(mn))
     except Exception:
-        # Intentionally swallow to keep UI resilient to user typos.
         return None
 
 
 def decode_addr_from_b64(b64_bytes: str) -> str | None:
-    """Decode a base64-encoded 32-byte public key into an Algorand address.
-
-    Args:
-        b64_bytes: Base64 string; typically TEAL global/local 'bytes' value.
-
-    Returns:
-        Encoded Algorand address or None if input is malformed/wrong length.
-    """
+    """Decode base64-encoded 32-byte key → bech32 address; None on mismatch."""
     try:
         raw = base64.b64decode(b64_bytes)
         return encoding.encode_address(raw) if len(raw) == 32 else None
@@ -105,31 +107,41 @@ def require_for_next_ops(
     *,
     add_assets: int = 0,
     add_app_locals: int = 0,
-    fee_buffer: int = 7_000,
+    fee_buffer: int = DEFAULT_FEE_BUFFER,
 ) -> int:
-    """Compute a conservative min-balance target before performing operations.
-
-    This is used to estimate how much funding a target account should have
-    *after* allocating for upcoming asset/app-local additions, plus a fee buffer.
-
-    Args:
-        c: Algod client.
-        addr: Target account.
-        add_assets: Number of additional assets the account will opt-in/mint.
-        add_app_locals: Number of additional app local states (opt-ins).
-        fee_buffer: Extra microalgos to cushion fees and rounding.
-
-    Returns:
-        Minimum µAlgos the account should retain to avoid MBR errors.
-    """
+    """Conservative min-balance target before performing operations."""
     base_min = acct_min_balance(c, addr)
     delta = ASSET_MBR * int(add_assets) + APP_LOCAL_MBR * int(add_app_locals)
     return base_min + delta + int(fee_buffer)
 
 
 def fmt_algos(micro: int) -> str:
-    """Format microalgos as a human-friendly ALGO string."""
+    """Format µAlgos into a human string."""
     return f"{micro / 1_000_000:.6f} ALGO"
+
+
+# =============================================================================
+# TEAL compile helpers
+# =============================================================================
+
+
+def _compile_pyteal_file(
+    c: algod.AlgodClient, module_path: pathlib.Path, mod_name: str, *, version: int = 8
+) -> tuple[bytes, bytes]:
+    """Load a PyTeal file dynamically and return (approval_prog, clear_prog) bytes."""
+    spec = importlib.util.spec_from_file_location(mod_name, str(module_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to import module at {module_path}")
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    ap_teal = compileTeal(mod.approval(), Mode.Application, version=version)
+    cl_teal = compileTeal(mod.clear(), Mode.Application, version=version)
+
+    comp_ap = c.compile(ap_teal)
+    comp_cl = c.compile(cl_teal)
+
+    return base64.b64decode(comp_ap["result"]), base64.b64decode(comp_cl["result"])
 
 
 # =============================================================================
@@ -138,19 +150,7 @@ def fmt_algos(micro: int) -> str:
 
 
 def read_router_globals(c: algod.AlgodClient, app_id: int) -> dict[str, object]:
-    """Read and decode Router global state into a dict.
-
-    TEAL key/value pairs are decoded as:
-      • 'bytes' type: best-effort decode to Algorand address if 32 bytes
-      • 'uint'  type: integer
-
-    Args:
-        c: Algod client.
-        app_id: Router application id.
-
-    Returns:
-        Mapping of global keys to decoded values (str/int).
-    """
+    """Read & decode Router globals into a friendly dict."""
     info = c.application_info(app_id)
     kvs = info["params"].get("global-state", [])
     out: dict[str, object] = {}
@@ -158,15 +158,27 @@ def read_router_globals(c: algod.AlgodClient, app_id: int) -> dict[str, object]:
         try:
             k = base64.b64decode(kv["key"]).decode()
         except Exception:
-            # Skip un-decodable keys; keep the reader resilient.
             continue
         v = kv["value"]
         if v["type"] == 1:  # bytes
             addr = decode_addr_from_b64(v["bytes"])
-            out[k] = addr or v["bytes"]  # Prefer decoded address, fallback raw base64
-        else:  # uint
+            out[k] = addr or v["bytes"]  # prefer real bech32 if possible
+        else:
             out[k] = v["uint"]
     return out
+
+
+def validate_router_globals(globals_dict: dict[str, Any]) -> list[str]:
+    """Return a list of missing/invalid router globals (empty list means OK)."""
+    problems: list[str] = []
+    for k in ("p1", "p2", "p3", "seller"):
+        v = globals_dict.get(k)
+        if not (isinstance(v, str) and len(v) == 58):
+            problems.append(k)
+    for k in ("bps1", "bps2", "bps3", "roybps", "asa"):
+        if not isinstance(globals_dict.get(k), int):
+            problems.append(k)
+    return problems
 
 
 def read_points_via_indexer(
@@ -174,21 +186,7 @@ def read_points_via_indexer(
     app_id: int,
     limit: int = 500,
 ) -> list[tuple[str, int, int]]:
-    """Aggregate (address, points, tier) tuples from Indexer local state.
-
-    Scans Indexer accounts with local state for `app_id` and extracts two
-    numeric values:
-      - points: any of 'points'|'pts'|'p'
-      - tier:   any of 'tier'|'t'
-
-    Args:
-        idx: Optional Indexer client (None → returns empty).
-        app_id: Superfan app id.
-        limit: Max number of accounts to traverse.
-
-    Returns:
-        A list of (address, points, tier) sorted by points desc.
-    """
+    """Aggregate (address, points, tier) tuples from Indexer local state."""
     if not idx or not app_id:
         return []
     try:
@@ -203,7 +201,7 @@ def read_points_via_indexer(
 
             for acct in accounts:
                 addr = acct.get("address")
-                # Find the local state for our app.
+                # Find local state for our app.
                 for ls in acct.get("apps-local-state", []):
                     if ls.get("id") != app_id:
                         continue
@@ -222,7 +220,7 @@ def read_points_via_indexer(
                             tier = v.get("uint", 0)
                     if addr and (pts > 0 or tier > 0):
                         results.append((addr, pts, tier))
-                    break  # only one local state entry per app id
+                    break  # only one local state per app id
 
             fetched += len(accounts)
             next_token = resp.get("next-token")
@@ -232,7 +230,7 @@ def read_points_via_indexer(
         results.sort(key=lambda x: x[1], reverse=True)
         return results
     except Exception:
-        # Keep UI tolerant to transient Indexer errors.
+        # Tolerate transient indexer issues
         return []
 
 
@@ -243,11 +241,11 @@ def read_points_via_indexer(
 
 @dataclass
 class Funder:
-    """Simple carrier for a potential funding source."""
+    """Potential funding source for MBR/fees."""
 
-    label: str  # Human-friendly label for UI (e.g., "Bank", "Seller")
-    mn: str  # 25-word mnemonic (TestNet demo only)
-    addr: str  # Account address
+    label: str
+    mn: str
+    addr: str
 
 
 def available_funders(
@@ -257,13 +255,7 @@ def available_funders(
     buyer_mn: str | None,
     creator_addr: str | None,
 ) -> list[Funder]:
-    """Collect viable funders from a set of optional mnemonics.
-
-    Excludes any funder whose address matches `creator_addr` to avoid self-pay.
-
-    Returns:
-        Ordered list of Funder objects (Bank, Seller, Admin, Buyer).
-    """
+    """Collect viable funders (Bank, Seller, Admin, Buyer), excluding creator."""
     funders: list[Funder] = []
     for label, mn in [
         ("Bank", bank_mn),
@@ -280,18 +272,16 @@ def available_funders(
 
 
 def pick_best_funder(c: algod.AlgodClient, funders: list[Funder]) -> Funder | None:
-    """Pick the funder with the highest balance, falling back to first on error."""
+    """Pick the funder with highest balance (fallback to first on error)."""
     if not funders:
         return None
     try:
         return sorted(funders, key=lambda f: acct_amount(c, f.addr), reverse=True)[0]
     except Exception:
-        # If balances can't be fetched, return first candidate.
         return funders[0]
 
 
 def _guard_no_self_pay(funder_addr: str, target_addr: str) -> None:
-    """Raise if an attempted payment is from an account to itself."""
     if funder_addr == target_addr:
         raise RuntimeError(
             "Refusing to self-pay (funder == target). Use a separate funded wallet."
@@ -305,11 +295,7 @@ def top_up(
     receiver_addr: str,
     microalgos: int,
 ) -> str:
-    """Send a funding payment and wait for confirmation.
-
-    Returns:
-        The payment transaction id.
-    """
+    """Send a funding payment and wait for confirmation; returns txid."""
     _guard_no_self_pay(sender_addr, receiver_addr)
     sp = c.suggested_params()
     tx = ftxn.PaymentTxn(
@@ -327,15 +313,9 @@ def ensure_funds(
     target_addr: str,
     *,
     target_min_after: int,
-    cushion: int = 30_000,
+    cushion: int = TOPUP_CUSHION_SMALL,
 ) -> str | None:
-    """Ensure `target_addr` has at least `target_min_after + cushion` µAlgos.
-
-    If the account is already at/above target, returns None. Otherwise funds it.
-
-    Returns:
-        txid of the top-up payment or None if no action needed.
-    """
+    """Ensure `target_addr` has at least `target_min_after + cushion` µAlgos."""
     have = acct_amount(c, target_addr)
     need = int(target_min_after) + int(cushion)
     if have >= need:
@@ -352,14 +332,7 @@ _DEFICIT_RE = re.compile(
 
 
 def parse_deficit_from_error(msg: str) -> int | None:
-    """Extract microalgo deficit from an Algod error message, if available.
-
-    Args:
-        msg: Error string from an Algod HTTP 400 response.
-
-    Returns:
-        The additional µAlgos required to satisfy MBR, or None if not parsable.
-    """
+    """Extract µAlgo deficit from a typical Algod MBR error line."""
     m = _DEFICIT_RE.search(msg or "")
     if not m:
         return None
@@ -374,34 +347,16 @@ def with_auto_topup_retry(
     target_addr: str,
     do_txn: Callable[[], str],
     funders: list[Funder],
-    cushion: int = 30_000,
+    cushion: int = TOPUP_CUSHION_SMALL,
 ) -> str:
-    """Execute `do_txn` and retry once with an automatic top-up if MBR is short.
-
-    This pattern improves UX by handling common "balance below min" failures
-    automatically when a funder is available.
-
-    Args:
-        c: Algod client.
-        target_addr: Address that must hold the MBR for the attempted `do_txn`.
-        do_txn: Callable that assembles, signs, and `send_transaction()`; returns txid.
-        funders: Candidate funders able to top up `target_addr`.
-        cushion: Extra µAlgos to add beyond the parsed deficit.
-
-    Returns:
-        The successful txid returned by `do_txn()`.
-
-    Raises:
-        RuntimeError: If no funder is available for a detected deficit.
-        Exception: Re-raises original exceptions when deficit cannot be parsed.
-    """
+    """Execute `do_txn` and retry once with an automatic top-up if MBR is short."""
     try:
         return do_txn()
     except Exception as e1:
         msg = str(e1)
         deficit = parse_deficit_from_error(msg)
         if deficit is None:
-            # Unknown failure; let the caller surface it.
+            # Unknown failure; surface to caller
             raise
         best = pick_best_funder(c, funders)
         if not best:
@@ -409,7 +364,7 @@ def with_auto_topup_retry(
                 f"Insufficient funds: need +{deficit}µAlgos (no funder available). Original error: {msg}"
             ) from e1
         top_up(c, best.mn, best.addr, target_addr, int(deficit) + int(cushion))
-        # Retry once after top-up.
+        # Retry once
         return do_txn()
 
 
@@ -429,22 +384,7 @@ def create_demo_ticket_asa_auto(
     total: int = 1000,
     decimals: int = 0,
 ) -> int:
-    """Create a demo ASA for tickets, with automatic top-up and retry.
-
-    Args:
-        c: Algod client.
-        creator_addr: ASA creator address (also manager/reserve/freeze/clawback).
-        creator_mn: Creator mnemonic.
-        funders: Candidate funders for MBR/fee top-ups.
-        unit: ASA unit name (e.g., "TIX").
-        name: ASA asset name (display).
-        total: Total supply.
-        decimals: Number of decimal places (tickets → 0).
-
-    Returns:
-        The newly created asset id.
-    """
-    # Estimate post-op minimum balance (1 new ASA holding) and ensure funds.
+    """Create a whole-number Ticket ASA with safe top-ups/retry."""
     target_min_after = require_for_next_ops(
         c, creator_addr, add_assets=1, fee_buffer=5_000
     )
@@ -456,7 +396,7 @@ def create_demo_ticket_asa_auto(
             best.addr,
             creator_addr,
             target_min_after=target_min_after,
-            cushion=30_000,
+            cushion=TOPUP_CUSHION_SMALL,
         )
 
     def _do() -> str:
@@ -482,7 +422,7 @@ def create_demo_ticket_asa_auto(
         target_addr=creator_addr,
         do_txn=_do,
         funders=funders,
-        cushion=30_000,
+        cushion=TOPUP_CUSHION_SMALL,
     )
     resp = wait_for_confirmation(c, txid, 4)
     return int(resp["asset-index"])
@@ -504,57 +444,24 @@ def deploy_router_app(
     primary_seller: str,
     funders: list[Funder],
 ) -> int:
-    """Compile and deploy the Router PyTeal app with provided parameters.
-
-    Globals encoded in `app_args`:
-      p1,p2,p3 (bytes)         → payout addresses
-      bps1,bps2,bps3 (uint)    → basis points for primary split
-      roy_bps (uint)           → resale artist royalty bps
-      asa (uint)               → ticket ASA id
-      seller (bytes)           → primary seller address
-
-    Args:
-        c: Algod client.
-        creator_addr: App creator/sender.
-        creator_mn: Creator mnemonic.
-        p1, p2, p3: Payout addresses.
-        bps1, bps2, bps3: Primary split bps (sum should equal 10000).
-        roy_bps: Resale artist royalty bps.
-        asa_id: Ticket ASA id (decimals=0 recommended).
-        primary_seller: Address for primary sales ASA transfers.
-        funders: Candidate funders for MBR/fee top-ups.
-
-    Returns:
-        Deployed application id.
-    """
-    # Load router.py from the repo and compile to TEAL, then to program bytes.
-    p = pathlib.Path(__file__).resolve().parents[2] / "contracts" / "router.py"
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("router", str(p))
-    m = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
-    spec.loader.exec_module(m)  # type: ignore[union-attr]
-
-    ap_teal = compileTeal(m.approval(), Mode.Application, version=8)
-    cl_teal = compileTeal(m.clear(), Mode.Application, version=8)
-
-    comp_ap = c.compile(ap_teal)
-    comp_cl = c.compile(cl_teal)
-    ap_prog = base64.b64decode(comp_ap["result"])
-    cl_prog = base64.b64decode(comp_cl["result"])
+    """Compile and deploy Router app. Address args are passed as 32 raw bytes."""
+    router_path = (
+        pathlib.Path(__file__).resolve().parents[2] / "contracts" / "router.py"
+    )
+    ap_prog, cl_prog = _compile_pyteal_file(c, router_path, "router", version=8)
 
     sp = c.suggested_params()
 
     app_args = [
-        p1.encode(),
-        p2.encode(),
-        p3.encode(),
-        int(bps1).to_bytes(8, "big"),
-        int(bps2).to_bytes(8, "big"),
-        int(bps3).to_bytes(8, "big"),
-        int(roy_bps).to_bytes(8, "big"),
-        int(asa_id).to_bytes(8, "big"),
-        primary_seller.encode(),
+        _addr32(p1),  # bytes: 32
+        _addr32(p2),  # bytes: 32
+        _addr32(p3),  # bytes: 32
+        int(bps1).to_bytes(8, "big"),  # uint
+        int(bps2).to_bytes(8, "big"),  # uint
+        int(bps3).to_bytes(8, "big"),  # uint
+        int(roy_bps).to_bytes(8, "big"),  # uint
+        int(asa_id).to_bytes(8, "big"),  # uint
+        _addr32(primary_seller),  # bytes: 32
     ]
 
     def _do() -> str:
@@ -564,19 +471,18 @@ def deploy_router_app(
             on_complete=ftxn.OnComplete.NoOpOC,
             approval_program=ap_prog,
             clear_program=cl_prog,
-            global_schema=ftxn.StateSchema(5, 4),
+            global_schema=ftxn.StateSchema(5, 4),  # 5 uints, 4 bytes
             local_schema=ftxn.StateSchema(0, 0),
             app_args=app_args,
         )
         return c.send_transaction(txn.sign(mnemonic.to_private_key(creator_mn)))
 
-    # Ensure creator can afford app creation fees/MBR, then attempt with retry.
     target_min_after = require_for_next_ops(
         c,
         creator_addr,
         add_assets=0,
         add_app_locals=0,
-        fee_buffer=8_000,
+        fee_buffer=CREATE_APP_FEE_BUFFER,
     )
     best = pick_best_funder(c, funders)
     if best:
@@ -586,7 +492,7 @@ def deploy_router_app(
             best.addr,
             creator_addr,
             target_min_after=target_min_after,
-            cushion=40_000,
+            cushion=TOPUP_CUSHION_MED,
         )
 
     txid = with_auto_topup_retry(
@@ -594,7 +500,62 @@ def deploy_router_app(
         target_addr=creator_addr,
         do_txn=_do,
         funders=funders,
-        cushion=40_000,
+        cushion=TOPUP_CUSHION_MED,
+    )
+    resp = wait_for_confirmation(c, txid, 4)
+    return int(resp["application-index"])
+
+
+def deploy_superfan_app(
+    c: algod.AlgodClient,
+    *,
+    creator_addr: str,
+    creator_mn: str,
+    admin_addr: str,
+    funders: list[Funder],
+) -> int:
+    """Compile and deploy Superfan app. First arg is admin as 32 raw bytes."""
+    sf_path = (
+        pathlib.Path(__file__).resolve().parents[2] / "contracts" / "superfan_pass.py"
+    )
+    ap_prog, cl_prog = _compile_pyteal_file(c, sf_path, "superfan_pass", version=8)
+
+    sp = c.suggested_params()
+    app_args = [_addr32(admin_addr)]  # <= critical: 32 raw bytes (not ASCII)
+
+    def _do() -> str:
+        txn = ftxn.ApplicationCreateTxn(
+            sender=creator_addr,
+            sp=sp,
+            on_complete=ftxn.OnComplete.NoOpOC,
+            approval_program=ap_prog,
+            clear_program=cl_prog,
+            global_schema=ftxn.StateSchema(0, 1),  # 0 uints, 1 bytes (admin)
+            local_schema=ftxn.StateSchema(2, 0),  # pts, tier
+            app_args=app_args,
+        )
+        return c.send_transaction(txn.sign(mnemonic.to_private_key(creator_mn)))
+
+    target_min_after = require_for_next_ops(
+        c, creator_addr, add_assets=0, add_app_locals=0, fee_buffer=6_000
+    )
+    best = pick_best_funder(c, funders)
+    if best:
+        ensure_funds(
+            c,
+            best.mn,
+            best.addr,
+            creator_addr,
+            target_min_after=target_min_after,
+            cushion=TOPUP_CUSHION_SMALL,
+        )
+
+    txid = with_auto_topup_retry(
+        c,
+        target_addr=creator_addr,
+        do_txn=_do,
+        funders=funders,
+        cushion=TOPUP_CUSHION_SMALL,
     )
     resp = wait_for_confirmation(c, txid, 4)
     return int(resp["application-index"])
@@ -612,7 +573,7 @@ def is_opted_in(c: algod.AlgodClient, addr: str, asa_id: int) -> bool:
 
 
 def asset_balance(c: algod.AlgodClient, addr: str, asa_id: int) -> int:
-    """Return the integer balance for `asa_id` held by `addr` (0 if none)."""
+    """Return integer balance for `asa_id` held by `addr` (0 if none)."""
     ai = c.account_info(addr)
     for a in ai.get("assets", []):
         if a["asset-id"] == int(asa_id):

@@ -3,40 +3,21 @@
 from __future__ import annotations
 
 """
-Streamlit page: Buy / Resale
+Buy / Resale (auto 1-click demo)
 
-Purpose
--------
-Operator-facing flows to demonstrate primary sales and secondary (resale)
-transactions for a Ticket ASA coordinated by a PyTeal "Royalty Router"
-application. This page intentionally favors clarity and guardrails over
-feature breadth so it's safe to demo live on TestNet.
+Primary Buy (1-click) now auto-prepares:
+• Router prefund for inner txns
+• Seller: opt-in + fund + receives 1 ticket from Creator
+• Buyer: opt-in + fund
+Then executes [Payment, AppCall("buy"), Axfer] per Router contract.
 
-What this page can do
----------------------
-• Discover the most recent Router app created by the configured creator.
-• Help a Buyer opt in to the Ticket ASA (prerequisite for receiving tokens).
-• Run a **Primary Buy**: buyer pays the Router; seller transfers 1 ASA unit;
-  Router performs inner payments to split the primary revenue.
-• Run a **Resale**: new buyer pays the Router; holder transfers the ASA unit;
-  Router pays artist royalty + remainder to the holder.
-
-Safety / UX notes
------------------
-• All actions validate minimum balances, ASA opt-ins, and router global state.
-• Buttons are disabled until preconditions are met.
-• App call fees are set with `flat_fee` to reliably cover inner transactions.
-
-Implementation highlights
--------------------------
-• We build three transactions and group them atomically:
-  [ApplicationCall, Payment, AssetTransfer]
-• Router global state is read once and validated before any spend.
-• Widget keys are namespaced via `ui.keys.k()` to avoid duplicate IDs across tabs.
+Resale (1-click demo) auto-prepares:
+• Holder (previous Buyer) and New Buyer (Admin, else Seller)
+• Router prefund, opt-ins, funding
+Then executes [Payment, AppCall("resale"), Axfer].
 """
 
-# --- make local packages importable (ui/, pages/, core/, services/) ----------
-# This keeps relative imports robust when Streamlit changes the working dir.
+# --- stable imports path for local packages ----------------------------------
 import pathlib
 import sys
 
@@ -44,7 +25,6 @@ APP_DIR = pathlib.Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 # -----------------------------------------------------------------------------
-
 
 import streamlit as st
 from algosdk import mnemonic
@@ -59,28 +39,15 @@ from services.algorand import (
     asset_balance,
     is_opted_in,
     read_router_globals,
+    available_funders,
+    pick_best_funder,
 )
 from ui.keys import k
 
-# ============================== Helper functions =============================
+# ============================== Helpers ======================================
 
 
 def _load_last_router_id(c, creator_addr: str | None) -> int | None:
-    """Return the most recent Router application ID created by `creator_addr`.
-
-    Heuristic:
-      - Scan "created-apps" for the creator.
-      - Decode global-state keys; consider it a "Router" if it exposes the
-        expected keys: p1/p2/p3 + bps1/bps2/bps3.
-      - Return the most recent match (highest app id).
-
-    Args:
-        c: An initialized `algosdk.v2client.algod.AlgodClient`.
-        creator_addr: Base32 Algorand address of the creator.
-
-    Returns:
-        The integer app id if found, else None.
-    """
     if not creator_addr:
         return None
     try:
@@ -89,34 +56,20 @@ def _load_last_router_id(c, creator_addr: str | None) -> int | None:
         for app in reversed(apps):
             keys = set()
             for kv in app.get("params", {}).get("global-state", []):
-                # Keys are base64-encoded; decode best-effort.
                 import base64
 
                 try:
                     keys.add(base64.b64decode(kv["key"]).decode())
                 except Exception:
-                    # Ignore undecodable keys; we're only sniffing for known names.
                     pass
             if {"p1", "p2", "p3", "bps1", "bps2", "bps3"}.issubset(keys):
                 return int(app["id"])
     except Exception:
-        # Swallow and return None so the UI can show a friendly message.
         pass
     return None
 
 
 def _router_and_asa_inputs(ss) -> tuple[int, int, int]:
-    """Render page-level inputs (Router App ID, Ticket ASA ID, price) and persist.
-
-    These inputs are shared by both "Primary Buy" and "Resale" panels.
-    Values persist in `st.session_state` to enable cross-tab reuse.
-
-    Args:
-        ss: Streamlit session_state (dict-like)
-
-    Returns:
-        Tuple of (app_id, asa_id, price) as integers.
-    """
     app_id = st.number_input(
         "Router App ID",
         min_value=0,
@@ -139,8 +92,6 @@ def _router_and_asa_inputs(ss) -> tuple[int, int, int]:
         key=k("trade", "price_microalgos"),
         help="Total µAlgos the buyer/new buyer pays to the Router application.",
     )
-
-    # Persist for this session; other tabs may pick these up.
     ss["TRADE_APP_ID"], ss["TRADE_ASA_ID"], ss["TRADE_PRICE"] = (
         int(app_id),
         int(asa_id),
@@ -150,15 +101,6 @@ def _router_and_asa_inputs(ss) -> tuple[int, int, int]:
 
 
 def _guard_router_globals_valid(globals_: dict, needs_seller: bool = True) -> None:
-    """Validate Router global state contains payout addresses (and seller when needed).
-
-    Args:
-        globals_: Dict returned by `services.algorand.read_router_globals()`.
-        needs_seller: When True, also require a valid `seller` address (primary buy).
-
-    Raises:
-        RuntimeError: If any required address is missing or malformed.
-    """
     req = ["p1", "p2", "p3"] + (["seller"] if needs_seller else [])
     addrs = [globals_.get(x) for x in req]
     if not all(isinstance(a, str) and len(a) == 58 for a in addrs):
@@ -170,36 +112,156 @@ def _guard_router_globals_valid(globals_: dict, needs_seller: bool = True) -> No
         raise RuntimeError(f"Router globals missing/invalid: {', '.join(missing)}.")
 
 
+def _amount_or_zero(c, addr: str) -> int:
+    try:
+        return int(c.account_info(addr).get("amount", 0))
+    except Exception:
+        return 0
+
+
+def _best_funder_excluding(c, ctx: dict, *exclude_addrs: str):
+    raw = available_funders(
+        ctx.get("bank_mn"),
+        ctx.get("seller_mn"),
+        ctx.get("admin_mn"),
+        ctx.get("buyer_mn"),
+        ctx.get("creator_addr"),
+    )
+    cand = [f for f in raw if f.addr not in set(a for a in exclude_addrs if a)]
+    return pick_best_funder(c, cand)
+
+
+def _top_up_account(c, ctx: dict, target_addr: str, *, min_target: int) -> str | None:
+    """Fund `target_addr` up to min_target using the best non-self funder."""
+    have = _amount_or_zero(c, target_addr)
+    need = max(0, int(min_target) - have)
+    if need == 0:
+        return None
+    best = _best_funder_excluding(c, ctx, target_addr)
+    if not best:
+        raise RuntimeError(
+            f"Need ~{min_target/1e6:.3f} ALGO for {target_addr}, but no external funder is configured."
+        )
+    sp = c.suggested_params()
+    pay = ftxn.PaymentTxn(sender=best.addr, sp=sp, receiver=target_addr, amt=need)
+    txid = c.send_transaction(pay.sign(mnemonic.to_private_key(best.mn)))
+    wait_for_confirmation(c, txid, 4)
+    return txid
+
+
+def _ensure_opt_in(c, mn: str, addr: str, asa_id: int) -> None:
+    if is_opted_in(c, addr, asa_id):
+        return
+    sp = c.suggested_params()
+    tx = ftxn.AssetOptInTxn(addr, sp, int(asa_id))
+    txid = c.send_transaction(tx.sign(mnemonic.to_private_key(mn)))
+    wait_for_confirmation(c, txid, 4)
+
+
+def _prefund_router_if_needed(
+    c, ctx: dict, app_id: int, *, min_target: int = 120_000
+) -> None:
+    app_addr = logic.get_application_address(int(app_id))
+    have = _amount_or_zero(c, app_addr)
+    if have >= int(min_target):
+        return
+    best = _best_funder_excluding(c, ctx, app_addr)
+    if not best:
+        # Not fatal; the outer AppCall may still cover inner fees if set high enough.
+        return
+    sp = c.suggested_params()
+    seed_txn = ftxn.PaymentTxn(
+        sender=best.addr, sp=sp, receiver=app_addr, amt=int(min_target) - have
+    )
+    txid = c.send_transaction(seed_txn.sign(mnemonic.to_private_key(best.mn)))
+    wait_for_confirmation(c, txid, 4)
+
+
+def _give_one_ticket(
+    c, sender_mn: str, sender_addr: str, receiver_addr: str, asa_id: int
+) -> None:
+    """Send 1 unit of ASA from sender → receiver (assumes receiver opted-in)."""
+    if asset_balance(c, receiver_addr, int(asa_id)) >= 1:
+        return
+    sp = c.suggested_params()
+    ax = ftxn.AssetTransferTxn(
+        sender=sender_addr, sp=sp, receiver=receiver_addr, amt=1, index=int(asa_id)
+    )
+    txid = c.send_transaction(ax.sign(mnemonic.to_private_key(sender_mn)))
+    wait_for_confirmation(c, txid, 4)
+
+
+def _auto_prepare_seller(c, ctx: dict, *, asa_id: int) -> None:
+    """Ensure Seller is opted-in, funded, and holds 1 ticket (Creator → Seller)."""
+    if not (ctx.get("seller_addr") and ctx.get("seller_mn")):
+        raise RuntimeError("Seller wallet not configured.")
+    if not (ctx.get("creator_addr") and ctx.get("creator_mn")):
+        raise RuntimeError("Creator wallet not configured (needed to send 1 ticket).")
+
+    # 1) Seller min balance for opt-in / fees
+    _top_up_account(c, ctx, ctx["seller_addr"], min_target=200_000)
+
+    # 2) Opt-in Seller to ASA
+    _ensure_opt_in(c, ctx["seller_mn"], ctx["seller_addr"], int(asa_id))
+
+    # 3) Send 1 ticket Creator → Seller (if not already holding)
+    _give_one_ticket(
+        c, ctx["creator_mn"], ctx["creator_addr"], ctx["seller_addr"], int(asa_id)
+    )
+
+
+def _auto_prepare_buyer(c, ctx: dict, *, price: int, asa_id: int) -> None:
+    """Ensure Buyer is funded for price+fees and opted in to ASA."""
+    if not (ctx.get("buyer_addr") and ctx.get("buyer_mn")):
+        raise RuntimeError("Buyer wallet not configured.")
+
+    # Fund buyer for price + safety (MBR + fees)
+    min_needed = int(price) + int(MIN_BALANCE) + 10_000
+    _top_up_account(c, ctx, ctx["buyer_addr"], min_target=min_needed)
+
+    # Buyer opt-in
+    _ensure_opt_in(c, ctx["buyer_mn"], ctx["buyer_addr"], int(asa_id))
+
+
+def _auto_prepare_resale_parties(
+    c,
+    ctx: dict,
+    *,
+    holder_addr: str,
+    holder_mn: str,
+    newbuyer_addr: str,
+    newbuyer_mn: str,
+    price: int,
+    asa_id: int,
+) -> None:
+    # Fund holder a little for their Axfer fee
+    _top_up_account(c, ctx, holder_addr, min_target=120_000)
+    # Fund new buyer for price + safety
+    min_needed = int(price) + int(MIN_BALANCE) + 10_000
+    _top_up_account(c, ctx, newbuyer_addr, min_target=min_needed)
+    # Ensure new buyer opt-in
+    _ensure_opt_in(c, newbuyer_mn, newbuyer_addr, int(asa_id))
+
+
 # ============================== Main render ==================================
 
 
 def render(ctx: dict) -> None:
-    """Render the Buy / Resale tab.
+    st.header("Buy / Resale (auto 1-click)")
 
-    `ctx` is produced by the sidebar and typically contains:
-      - creator_addr / creator_mn
-      - seller_addr / seller_mn
-      - buyer_addr  / buyer_mn
-      - admin_addr  / admin_mn
-      - (optional) bank_mn
-    """
-    st.header("Buy / Resale")
-
-    # Initialize algod client once (cached by core.clients).
     c = get_algod()
     ss = st.session_state
 
+    # Quick helpers row
     col = st.columns(3)
-
-    # -- Discover the most recent Router owned by the creator ------------------
     with col[0]:
         if st.button(
             "Use Last Router (creator)",
-            disabled=not ctx["creator_addr"],
+            disabled=not ctx.get("creator_addr"),
             use_container_width=True,
             key=k("trade", "use_last_router"),
         ):
-            app_id = _load_last_router_id(c, ctx["creator_addr"])
+            app_id = _load_last_router_id(c, ctx.get("creator_addr"))
             if not app_id:
                 st.info("No Router apps found for this creator.")
             else:
@@ -210,249 +272,211 @@ def render(ctx: dict) -> None:
                         ss["TRADE_ASA_ID"] = int(gs["asa"])
                     st.success(f"Loaded Router #{app_id} (ASA {gs.get('asa', '—')})")
                 except Exception:
-                    # Even if globals read fails, we still surfaced the app id.
                     st.success(f"Loaded Router #{app_id}")
 
-    # -- Quick buyer opt-in to the Ticket ASA (prerequisite to receive ASA) ----
     with col[1]:
         if st.button(
             "Buyer Opt-in to ASA",
             disabled=not (
-                ctx["buyer_mn"] and ctx["buyer_addr"] and ss.get("TRADE_ASA_ID")
+                ctx.get("buyer_mn") and ctx.get("buyer_addr") and ss.get("TRADE_ASA_ID")
             ),
             use_container_width=True,
             key=k("trade", "buyer_optin"),
         ):
             try:
-                sp = c.suggested_params()
-                tx = ftxn.AssetOptInTxn(ctx["buyer_addr"], sp, int(ss["TRADE_ASA_ID"]))
-                txid = c.send_transaction(
-                    tx.sign(mnemonic.to_private_key(ctx["buyer_mn"]))
+                _ensure_opt_in(
+                    c, ctx["buyer_mn"], ctx["buyer_addr"], int(ss["TRADE_ASA_ID"])
                 )
-                wait_for_confirmation(c, txid, 4)
-                st.success(f"Buyer opted-in: {txid}")
+                st.success("Buyer opted-in.")
             except Exception as e:
                 st.error(f"Opt-in failed: {e}")
 
-    # Reserve right column for future quick tools.
     with col[2]:
-        st.empty()
+        if st.button(
+            "Prefund Router (0.2 ALGO)",
+            disabled=not int(ss.get("TRADE_APP_ID", 0)),
+            use_container_width=True,
+            key=k("trade", "prefund_router_btn"),
+        ):
+            try:
+                _prefund_router_if_needed(
+                    c, ctx, int(ss["TRADE_APP_ID"]), min_target=200_000
+                )
+                st.success("Router prefunded.")
+            except Exception as e:
+                st.error(f"Prefund failed: {e}")
 
     st.markdown("---")
 
-    # Shared inputs: Router ID, ASA ID, price
+    # Shared inputs
     app_id, asa_id, price = _router_and_asa_inputs(ss)
 
-    colA, colB = st.columns(2)
+    # =============================== PRIMARY BUY ==============================
+    st.subheader("Primary Buy (Auto 1-click)")
 
-    # =============================== Primary Buy ==============================
-    with colA:
-        st.subheader("Primary Buy")
-
-        # Basic precondition checks to avoid building transactions that will fail.
-        buy_disabled = not (
-            ctx["buyer_mn"]
-            and ctx["seller_mn"]
+    if st.button(
+        "Run Buy (1-click: prepare + execute)",
+        disabled=not (
+            ctx.get("buyer_mn")
+            and ctx.get("seller_mn")
             and int(app_id) > 0
             and int(asa_id) > 0
             and int(price) > 0
-        )
-        if st.button(
-            "Run Buy (1-click)",
-            disabled=buy_disabled,
-            use_container_width=True,
-            key=k("trade", "buy_run"),
-        ):
-            try:
-                # Read & validate Router global state (payout addresses + seller).
-                accs = read_router_globals(c, int(app_id))
-                _guard_router_globals_valid(accs, needs_seller=True)
-                p1_gs, p2_gs, p3_gs, seller_gs = (
-                    accs["p1"],
-                    accs["p2"],
-                    accs["p3"],
-                    accs["seller"],
-                )
+        ),
+        use_container_width=True,
+        key=k("trade", "buy_auto"),
+    ):
+        try:
+            # Validate Router globals (including seller)
+            gs = read_router_globals(c, int(app_id))
+            _guard_router_globals_valid(gs, needs_seller=True)
 
-                # Suggested params for each txn.
-                # AppCall must cover inner transactions via flat fee.
-                sp0 = c.suggested_params()
-                sp0.flat_fee = True
-                sp0.fee = APP_CALL_INNER_FEE
-                sp1 = c.suggested_params()
-                sp2 = c.suggested_params()
+            # Auto prep: Router, Seller, Buyer
+            _prefund_router_if_needed(c, ctx, int(app_id), min_target=120_000)
+            _auto_prepare_seller(c, ctx, asa_id=int(asa_id))
+            _auto_prepare_buyer(c, ctx, price=int(price), asa_id=int(asa_id))
 
-                # Guardrails: balances and opt-ins.
-                if algo_balance(c, ctx["buyer_addr"]) < (
-                    int(price) + MIN_BALANCE + 5_000
-                ):
-                    raise RuntimeError("Buyer underfunded. Faucet or 'Top up' first.")
-                if not is_opted_in(c, ctx["buyer_addr"], int(asa_id)):
-                    raise RuntimeError("Buyer not opted-in to ASA.")
-                if not is_opted_in(c, ctx["seller_addr"], int(asa_id)):
-                    raise RuntimeError("Seller not opted-in to ASA (or no holding).")
+            # Build group [Payment, AppCall, Axfer]
+            sp_pay = c.suggested_params()
+            sp_app = c.suggested_params()
+            sp_app.flat_fee = True
+            sp_app.fee = max(APP_CALL_INNER_FEE, 3_000)  # BUY has 3 inner payments
+            sp_axfer = c.suggested_params()
 
-                # Transactions for the atomic group:
-                # 1) AppCall "buy"       (sender = Buyer)
-                # 2) Payment price → app (sender = Buyer)
-                # 3) ASA xfer            (sender = Seller → Buyer)
-                app_call = ftxn.ApplicationNoOpTxn(
-                    sender=ctx["buyer_addr"],
-                    sp=sp0,
-                    index=int(app_id),
-                    app_args=[b"buy"],
-                    accounts=[p1_gs, p2_gs, p3_gs, seller_gs],
-                )
-                app_addr = logic.get_application_address(int(app_id))
-                pay = ftxn.PaymentTxn(
-                    sender=ctx["buyer_addr"],
-                    sp=sp1,
-                    receiver=app_addr,
-                    amt=int(price),
-                )
-                asa_txn = ftxn.AssetTransferTxn(
-                    sender=ctx["seller_addr"],
-                    sp=sp2,
-                    receiver=ctx["buyer_addr"],
-                    amt=1,
-                    index=int(asa_id),
-                )
+            app_addr = logic.get_application_address(int(app_id))
+            pay = ftxn.PaymentTxn(
+                sender=ctx["buyer_addr"], sp=sp_pay, receiver=app_addr, amt=int(price)
+            )
+            app_call = ftxn.ApplicationNoOpTxn(
+                sender=ctx["buyer_addr"],
+                sp=sp_app,
+                index=int(app_id),
+                app_args=[b"buy"],
+                # accounts list not required by contract, but harmless:
+                accounts=[gs["p1"], gs["p2"], gs["p3"], gs["seller"]],
+            )
+            axfer = ftxn.AssetTransferTxn(
+                sender=ctx["seller_addr"],
+                sp=sp_axfer,
+                receiver=ctx["buyer_addr"],
+                amt=1,
+                index=int(asa_id),
+            )
 
-                # Group and sign in the correct order.
-                gid = ftxn.calculate_group_id([app_call, pay, asa_txn])
-                for t in (app_call, pay, asa_txn):
-                    t.group = gid
+            gid = ftxn.calculate_group_id([pay, app_call, axfer])
+            for t in (pay, app_call, axfer):
+                t.group = gid
 
-                txid = c.send_transactions(
-                    [
-                        app_call.sign(mnemonic.to_private_key(ctx["buyer_mn"])),
-                        pay.sign(mnemonic.to_private_key(ctx["buyer_mn"])),
-                        asa_txn.sign(mnemonic.to_private_key(ctx["seller_mn"])),
-                    ]
-                )
-                resp = wait_for_confirmation(c, txid, 4)
-                st.success(f"✅ Buy OK: {txid} | Round {resp['confirmed-round']}")
-            except Exception as e:
-                st.error(f"Buy failed: {e}")
+            txid = c.send_transactions(
+                [
+                    pay.sign(mnemonic.to_private_key(ctx["buyer_mn"])),
+                    app_call.sign(mnemonic.to_private_key(ctx["buyer_mn"])),
+                    axfer.sign(mnemonic.to_private_key(ctx["seller_mn"])),
+                ]
+            )
+            resp = wait_for_confirmation(c, txid, 4)
+            st.success(f"✅ Buy OK: {txid} | Round {resp['confirmed-round']}")
+            # Remember last successful holder for 1-click resale
+            st.session_state["LAST_HOLDER_ADDR"] = ctx["buyer_addr"]
+        except Exception as e:
+            st.error(f"Buy failed: {e}")
 
-    # ================================= Resale =================================
-    with colB:
-        st.subheader("Resale (holder → new buyer)")
+    st.markdown("---")
 
-        # The resale flow uses two mnemonics provided ad-hoc:
-        # - holder_mn: current owner of the ASA unit
-        # - newbuyer_mn: the new buyer
-        holder_mn = st.text_input(
-            "Holder mnemonic (current owner)",
-            "",
-            type="password",
-            key=k("trade", "holder_mn"),
-        )
-        newbuyer_mn = st.text_input(
-            "New buyer mnemonic",
-            "",
-            type="password",
-            key=k("trade", "newbuyer_mn"),
-        )
+    # ================================= RESALE =================================
+    st.subheader("Resale (Auto 1-click demo)")
 
-        holder_addr = addr_from_mn(holder_mn) if holder_mn else None
-        newbuyer_addr = addr_from_mn(newbuyer_mn) if newbuyer_mn else None
+    # Choose holder/new buyer for the demo automatically:
+    demo_holder_addr = st.session_state.get("LAST_HOLDER_ADDR", ctx.get("buyer_addr"))
+    demo_holder_mn = (
+        ctx.get("buyer_mn") if demo_holder_addr == ctx.get("buyer_addr") else None
+    )
 
-        # Helper: opt-in the new buyer to the ASA.
-        if st.button(
-            "Opt-in New Buyer to ASA",
-            disabled=not (newbuyer_mn and newbuyer_addr and int(asa_id) > 0),
-            use_container_width=True,
-            key=k("trade", "newbuyer_optin"),
-        ):
-            try:
-                sp = c.suggested_params()
-                txid = c.send_transaction(
-                    ftxn.AssetOptInTxn(newbuyer_addr, sp, int(asa_id)).sign(
-                        mnemonic.to_private_key(newbuyer_mn)
-                    )
-                )
-                wait_for_confirmation(c, txid, 4)
-                st.success(f"New buyer opted-in: {txid}")
-            except Exception as e:
-                st.error(f"Opt-in failed: {e}")
+    # Prefer Admin as the new buyer; fall back to Seller if Admin not set.
+    demo_newbuyer_addr = ctx.get("admin_addr") or ctx.get("seller_addr")
+    demo_newbuyer_mn = ctx.get("admin_mn") or ctx.get("seller_mn")
 
-        resale_disabled = not (
-            holder_mn
-            and newbuyer_mn
-            and int(app_id) > 0
+    st.caption(
+        f"Holder: `{demo_holder_addr or '—'}` → New Buyer: `{demo_newbuyer_addr or '—'}` "
+        "(auto-chosen for the demo: Holder=Buyer; New Buyer=Admin/Seller)"
+    )
+
+    if st.button(
+        "Run Resale (1-click: prepare + execute)",
+        disabled=not (
+            int(app_id) > 0
             and int(asa_id) > 0
             and int(price) > 0
-        )
-        if st.button(
-            "Run Resale (1-click)",
-            disabled=resale_disabled,
-            use_container_width=True,
-            key=k("trade", "resale_run"),
-        ):
-            try:
-                if not holder_addr or not newbuyer_addr:
-                    raise RuntimeError("Missing holder/new buyer address.")
+            and demo_holder_addr
+            and demo_holder_mn
+            and demo_newbuyer_addr
+            and demo_newbuyer_mn
+        ),
+        use_container_width=True,
+        key=k("trade", "resale_auto"),
+    ):
+        try:
+            # Validate Router globals (payouts only needed)
+            gs = read_router_globals(c, int(app_id))
+            _guard_router_globals_valid(gs, needs_seller=False)
 
-                # Read & validate Router globals (only payout addresses required).
-                accs = read_router_globals(c, int(app_id))
-                _guard_router_globals_valid(accs, needs_seller=False)
-                p1_gs, p2_gs, p3_gs = accs["p1"], accs["p2"], accs["p3"]
+            # Auto prep: Router prefund, holder/new buyer funding & opt-in
+            _prefund_router_if_needed(c, ctx, int(app_id), min_target=120_000)
+            _auto_prepare_resale_parties(
+                c,
+                ctx,
+                holder_addr=demo_holder_addr,
+                holder_mn=demo_holder_mn,
+                newbuyer_addr=demo_newbuyer_addr,
+                newbuyer_mn=demo_newbuyer_mn,
+                price=int(price),
+                asa_id=int(asa_id),
+            )
 
-                # App call must cover inner transactions via flat fee.
-                sp0 = c.suggested_params()
-                sp0.flat_fee = True
-                sp0.fee = 3_000  # typical cost; adjust if router changes
-                sp1 = c.suggested_params()
-                sp2 = c.suggested_params()
+            # Guard seller actually owns 1 ticket
+            if asset_balance(c, demo_holder_addr, int(asa_id)) < 1:
+                raise RuntimeError("Holder does not own the ticket (cannot resale).")
 
-                # Guardrails: balances and opt-ins.
-                if algo_balance(c, newbuyer_addr) < (int(price) + MIN_BALANCE + 5_000):
-                    raise RuntimeError("New buyer underfunded.")
-                if not is_opted_in(c, newbuyer_addr, int(asa_id)):
-                    raise RuntimeError("New buyer not opted-in to ASA.")
-                if asset_balance(c, holder_addr, int(asa_id)) < 1:
-                    raise RuntimeError("Holder does not own the ticket.")
+            # Build group [Payment, AppCall, Axfer]
+            sp_pay = c.suggested_params()
+            sp_app = c.suggested_params()
+            sp_app.flat_fee = True
+            sp_app.fee = 2_000  # RESALE has 2 inner payments
+            sp_axfer = c.suggested_params()
 
-                # Transactions for the atomic resale group:
-                # 1) AppCall "resale"        (sender = New Buyer)
-                # 2) Payment price → app     (sender = New Buyer)
-                # 3) ASA xfer                (sender = Holder → New Buyer)
-                app_call = ftxn.ApplicationNoOpTxn(
-                    sender=newbuyer_addr,
-                    sp=sp0,
-                    index=int(app_id),
-                    app_args=[b"resale"],
-                    accounts=[p1_gs, p2_gs, p3_gs, holder_addr],
-                )
-                app_addr = logic.get_application_address(int(app_id))
-                pay = ftxn.PaymentTxn(
-                    sender=newbuyer_addr,
-                    sp=sp1,
-                    receiver=app_addr,
-                    amt=int(price),
-                )
-                asa_txn = ftxn.AssetTransferTxn(
-                    sender=holder_addr,
-                    sp=sp2,
-                    receiver=newbuyer_addr,
-                    amt=1,
-                    index=int(asa_id),
-                )
+            app_addr = logic.get_application_address(int(app_id))
+            pay = ftxn.PaymentTxn(
+                sender=demo_newbuyer_addr, sp=sp_pay, receiver=app_addr, amt=int(price)
+            )
+            app_call = ftxn.ApplicationNoOpTxn(
+                sender=demo_newbuyer_addr,
+                sp=sp_app,
+                index=int(app_id),
+                app_args=[b"resale"],
+                accounts=[gs["p1"], gs["p2"], gs["p3"], demo_holder_addr],
+            )
+            axfer = ftxn.AssetTransferTxn(
+                sender=demo_holder_addr,
+                sp=sp_axfer,
+                receiver=demo_newbuyer_addr,
+                amt=1,
+                index=int(asa_id),
+            )
 
-                # Group, sign by respective parties, submit, and wait.
-                gid = ftxn.calculate_group_id([app_call, pay, asa_txn])
-                for t in (app_call, pay, asa_txn):
-                    t.group = gid
+            gid = ftxn.calculate_group_id([pay, app_call, axfer])
+            for t in (pay, app_call, axfer):
+                t.group = gid
 
-                txid = c.send_transactions(
-                    [
-                        app_call.sign(mnemonic.to_private_key(newbuyer_mn)),
-                        pay.sign(mnemonic.to_private_key(newbuyer_mn)),
-                        asa_txn.sign(mnemonic.to_private_key(holder_mn)),
-                    ]
-                )
-                resp = wait_for_confirmation(c, txid, 4)
-                st.success(f"✅ Resale OK: {txid} | Round {resp['confirmed-round']}")
-            except Exception as e:
-                st.error(f"Resale failed: {e}")
+            txid = c.send_transactions(
+                [
+                    pay.sign(mnemonic.to_private_key(demo_newbuyer_mn)),
+                    app_call.sign(mnemonic.to_private_key(demo_newbuyer_mn)),
+                    axfer.sign(mnemonic.to_private_key(demo_holder_mn)),
+                ]
+            )
+            resp = wait_for_confirmation(c, txid, 4)
+            st.success(f"✅ Resale OK: {txid} | Round {resp['confirmed-round']}")
+            # Update last holder for next resale demo
+            st.session_state["LAST_HOLDER_ADDR"] = demo_newbuyer_addr
+        except Exception as e:
+            st.error(f"Resale failed: {e}")
